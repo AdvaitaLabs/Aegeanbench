@@ -139,7 +139,9 @@ class HttpRunner:
                 timeout=self.timeout,
             )
             if consensus_resp.status_code != 201:
-                return self._error(case, f"Consensus failed: {consensus_resp.text}")
+                error_msg = f"Consensus failed (status {consensus_resp.status_code}): {consensus_resp.text}"
+                print(f"[DEBUG] {error_msg}")
+                return self._error(case, error_msg)
 
             consensus_result = consensus_resp.json()
 
