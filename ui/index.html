@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AegeanBench Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="bg"></div>
+
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-mark">Æ</span>
+        <div>
+          <div class="logo-title">AegeanBench</div>
+          <div class="logo-sub">Multi-Agent Consensus Benchmark</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-ghost" id="btn-load">Load Results JSON</button>
+        <button class="btn btn-primary" id="btn-demo">Load Demo Data</button>
+        <input type="file" id="file-input" accept=".json" hidden />
+      </div>
+    </div>
+  </header>
+
+  <main class="main">
+    <!-- KPI row -->
+    <section class="kpi-row" id="kpi-row">
+      <div class="kpi-card" id="kpi-accuracy">
+        <div class="kpi-label">Overall Accuracy</div>
+        <div class="kpi-value">—</div>
+        <div class="kpi-sub">cases correct / total</div>
+      </div>
+      <div class="kpi-card" id="kpi-consensus">
+        <div class="kpi-label">Consensus Rate</div>
+        <div class="kpi-value">—</div>
+        <div class="kpi-sub">quorum reached</div>
+      </div>
+      <div class="kpi-card" id="kpi-tokens">
+        <div class="kpi-label">Total Tokens</div>
+        <div class="kpi-value">—</div>
+        <div class="kpi-sub">prompt + completion</div>
+      </div>
+      <div class="kpi-card" id="kpi-saved">
+        <div class="kpi-label">Tokens Saved</div>
+        <div class="kpi-value">—</div>
+        <div class="kpi-sub">early-stop + pre-screen</div>
+      </div>
+      <div class="kpi-card" id="kpi-latency">
+        <div class="kpi-label">p95 Latency</div>
+        <div class="kpi-value">—</div>
+        <div class="kpi-sub">seconds</div>
+      </div>
+    </section>
+
+    <!-- Charts row 1 -->
+    <section class="charts-row">
+      <div class="chart-card span2">
+        <div class="chart-title">Accuracy by Category</div>
+        <canvas id="chart-category"></canvas>
+      </div>
+      <div class="chart-card span2">
+        <div class="chart-title">Accuracy by Difficulty</div>
+        <canvas id="chart-difficulty"></canvas>
+      </div>
+    </section>
+
+    <!-- Charts row 2 -->
+    <section class="charts-row">
+      <div class="chart-card span2">
+        <div class="chart-title">Consensus Metrics</div>
+        <canvas id="chart-consensus"></canvas>
+      </div>
+      <div class="chart-card span2">
+        <div class="chart-title">Token Consumption Breakdown</div>
+        <canvas id="chart-tokens"></canvas>
+      </div>
+    </section>
+
+    <!-- Charts row 3 -->
+    <section class="charts-row">
+      <div class="chart-card span2">
+        <div class="chart-title">Risk Pipeline Metrics</div>
+        <canvas id="chart-risk"></canvas>
+      </div>
+      <div class="chart-card span2">
+        <div class="chart-title">Latency Distribution (per case)</div>
+        <canvas id="chart-latency"></canvas>
+      </div>
+    </section>
+
+    <!-- Results table -->
+    <section class="table-section">
+      <div class="table-header">
+        <div class="chart-title">Case Results</div>
+        <div class="table-filters">
+          <select id="filter-category"><option value="">All Categories</option></select>
+          <select id="filter-difficulty"><option value="">All Difficulties</option></select>
+          <select id="filter-correct"><option value="">All Outcomes</option><option value="true">Passed</option><option value="false">Failed</option></select>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="results-table">
+          <thead>
+            <tr>
+              <th>Case ID</th>
+              <th>Name</th>
+              <th>Category</th>
+              <th>Difficulty</th>
+              <th>Outcome</th>
+              <th>Tokens</th>
+              <th>Latency</th>
+              <th>Correct</th>
+            </tr>
+          </thead>
+          <tbody id="results-body">
+            <tr class="empty-row"><td colspan="8">Load a results JSON or click "Load Demo Data" to begin.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
+

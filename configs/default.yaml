@@ -1,0 +1,39 @@
+# AegeanBench default configuration
+
+benchmark:
+  version: "0.1.0"
+  name: "AegeanBench Full Suite"
+
+runner:
+  # "mock" = deterministic, no LLM needed
+  # "aegean" = uses real aegean-consensus framework
+  type: "mock"
+  seed: 42
+  base_latency_s: 0.05
+  fallback_to_mock: true  # used by AegeanRunner when aegean-consensus unavailable
+
+consensus:
+  default_num_agents: 3
+  default_max_rounds: 5
+  default_quorum_threshold: 0.5
+  default_stability_horizon: 2
+  enable_early_termination: true
+
+collaboration:
+  default_num_agents: 3
+  default_max_rounds: 5
+
+risk:
+  # Validator weights (mirrors aegean-consensus defaults)
+  identity_weight: 0.90
+  anomaly_weight: 0.85
+  compliance_weight: 0.95
+  amount_weight: 0.88
+  context_weight: 0.80
+
+output:
+  results_dir: "results"
+  save_json: true
+  save_csv: true
+  print_summary: true
+
