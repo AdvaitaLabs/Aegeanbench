@@ -111,22 +111,39 @@ class HttpRunner:
         group_id = group["group_id"]
 
         try:
-            # Step 2: Add agents to group
+            # Step 2: Fetch registered agents, then add to group
+            agents_resp = requests.get(
+                f"{self.base_url}/api/v1/groups/agents",
+                timeout=self.timeout,
+            )
+            if agents_resp.status_code != 200 or not agents_resp.json():
+                return self._error(case, f"No registered agents available: {agents_resp.text}")
+
+            available_agents = agents_resp.json()
             n = max(1, case.num_agents)
             weights = case.agent_capability_weights or [1.0] * n
             if len(weights) < n:
                 weights = weights + [1.0] * (n - len(weights))
 
-            for i in range(n):
-                requests.post(
+            # Use as many available agents as needed (cycle if fewer available)
+            selected = [available_agents[i % len(available_agents)] for i in range(n)]
+
+            added = 0
+            for i, agent_info in enumerate(selected):
+                member_resp = requests.post(
                     f"{self.base_url}/api/v1/groups/{group_id}/members",
                     json={
-                        "agent_id": f"agent-{i}",
+                        "agent_id": agent_info["agent_id"],
                         "role": "consensus_agent",
                         "capability_weight": weights[i],
                     },
                     timeout=self.timeout,
                 )
+                if member_resp.status_code == 201:
+                    added += 1
+
+            if added == 0:
+                return self._error(case, "Failed to add any agents to group")
 
             # Step 3: Execute consensus
             consensus_resp = requests.post(
@@ -246,12 +263,18 @@ class HttpRunner:
         group_id = group["group_id"]
 
         try:
-            # Add agents
+            # Fetch registered agents then add to group
+            agents_resp = requests.get(
+                f"{self.base_url}/api/v1/groups/agents",
+                timeout=self.timeout,
+            )
+            available_agents = agents_resp.json() if agents_resp.status_code == 200 else []
             n = max(1, case.num_agents)
-            for i in range(n):
+            selected = [available_agents[i % len(available_agents)] for i in range(n)] if available_agents else []
+            for agent_info in selected:
                 requests.post(
                     f"{self.base_url}/api/v1/groups/{group_id}/members",
-                    json={"agent_id": f"agent-{i}", "role": "collaborator"},
+                    json={"agent_id": agent_info["agent_id"], "role": "collaborator"},
                     timeout=self.timeout,
                 )
 
