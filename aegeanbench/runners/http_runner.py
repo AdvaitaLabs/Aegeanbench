@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 import requests
-from typing import List, Optional, Any
+from typing import Any, Dict, List, Tuple
 
 from aegeanbench.core.models import (
     AgentSnapshot,
@@ -164,14 +164,22 @@ class HttpRunner:
                     agent_id=r.get("agent_id", f"agent-{i}"),
                     answer=r.get("answer"),
                     confidence=r.get("confidence", 0.5),
-                    tokens_prompt=int(r.get("tokens_prompt", 0)),
-                    tokens_completion=int(r.get("tokens_completion", 0)),
+                    tokens_prompt=self._to_int(r.get("tokens_prompt", 0)),
+                    tokens_completion=self._to_int(r.get("tokens_completion", 0)),
                 )
                 for i, r in enumerate(agent_responses)
             ]
 
-            tokens_prompt = sum(s.tokens_prompt for s in snapshots)
-            tokens_completion = sum(s.tokens_completion for s in snapshots)
+            snapshot_prompt = sum(s.tokens_prompt for s in snapshots)
+            snapshot_completion = sum(s.tokens_completion for s in snapshots)
+
+            tokens_prompt = snapshot_prompt
+            tokens_completion = snapshot_completion
+            if tokens_prompt == 0 and tokens_completion == 0:
+                tokens_prompt, tokens_completion = self._extract_token_totals(
+                    consensus_result,
+                    entries=agent_responses,
+                )
 
             con_metrics = self.metrics.compute_consensus_metrics(
                 agent_answers=agent_answers,
@@ -261,8 +269,11 @@ class HttpRunner:
                     result = resp.json()
                     # Accumulate tokens
                     for agent_resp in result.get("agent_responses", []):
-                        tokens_total += agent_resp.get("tokens_prompt", 0)
-                        tokens_total += agent_resp.get("tokens_completion", 0)
+                        prompt_i, completion_i = self._extract_token_totals(
+                            agent_resp,
+                            entries=[agent_resp],
+                        )
+                        tokens_total += prompt_i + completion_i
 
             col_metrics = CollaborationMetrics(
                 task_completed=completed == len(subtasks),
@@ -334,9 +345,10 @@ class HttpRunner:
 
         pre_screen = decision.get("pre_screen_triggered", False)
 
-        tokens_prompt = int(decision.get("tokens_prompt", 0))
-        tokens_completion = int(decision.get("tokens_completion", 0))
-        tokens_saved = int(decision.get("tokens_saved", 0))
+        tokens_prompt, tokens_completion = self._extract_token_totals(decision)
+        tokens_saved = self._to_int(
+            decision.get("tokens_saved", decision.get("tokens_saved_by_prescreen", 0))
+        )
 
         risk_metrics = RiskMetrics(
             expected_decision=expected,
@@ -381,6 +393,75 @@ class HttpRunner:
     # ──────────────────────────────────────────────────────────────
     # Helpers
     # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_int(value: Any, default: int = 0) -> int:
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _extract_token_totals(
+        self,
+        payload: Dict[str, Any],
+        entries: List[Dict[str, Any]] | None = None,
+    ) -> Tuple[int, int]:
+        """
+        Provider-agnostic token extraction.
+
+        Supports:
+          - tokens_prompt / tokens_completion
+          - input_tokens / output_tokens
+          - prompt_tokens / completion_tokens
+          - total_tokens
+          - usage / token_usage nested objects
+          - per-agent entry list aggregation
+        """
+        token_objects = []
+        if isinstance(payload, dict):
+            token_objects.append(payload)
+            usage_obj = payload.get("usage") or payload.get("token_usage")
+            if isinstance(usage_obj, dict):
+                token_objects.append(usage_obj)
+
+        prompt = 0
+        completion = 0
+
+        for obj in token_objects:
+            prompt = max(
+                prompt,
+                self._to_int(
+                    obj.get("tokens_prompt", obj.get("input_tokens", obj.get("prompt_tokens", 0)))
+                ),
+            )
+            completion = max(
+                completion,
+                self._to_int(
+                    obj.get(
+                        "tokens_completion",
+                        obj.get("output_tokens", obj.get("completion_tokens", 0)),
+                    )
+                ),
+            )
+
+            total_tokens = self._to_int(obj.get("total_tokens", 0))
+            if total_tokens > 0 and prompt + completion == 0:
+                prompt = int(total_tokens * 0.8)
+                completion = total_tokens - prompt
+
+        if entries:
+            sum_prompt = 0
+            sum_completion = 0
+            for entry in entries:
+                p_i, c_i = self._extract_token_totals(entry)
+                sum_prompt += p_i
+                sum_completion += c_i
+            prompt = max(prompt, sum_prompt)
+            completion = max(completion, sum_completion)
+
+        return prompt, completion
 
     @staticmethod
     def _error(case: BenchmarkCase, msg: str) -> BenchmarkResult:
