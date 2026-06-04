@@ -110,5 +110,98 @@ class KaggleHistoryLoader:
         return self._load_csv(num_matches)
 
     def _load_csv(self, num_matches: int) -> List[Match]:
-        logger.warning("kaggle CSV loader not yet implemented; using synthetic")
-        return _synthetic_history(num_matches)
+        """
+        Real loader for the 'International football results from 1872'
+        Kaggle dataset (martj42/international-football-results-from-1872-to-2017).
+
+        CSV columns:
+            date,home_team,away_team,home_score,away_score,tournament,city,country,neutral
+
+        Steps to populate local file:
+            1. Download from kaggle.com or via `kaggle datasets download`
+            2. Unzip and place results.csv at DEFAULT_DATA_PATH
+               (~/.aegeanbench/kaggle/international_results.csv)
+            3. KaggleHistoryLoader(mock_by_default=False).load() will use it.
+
+        On any parse failure we fall back to synthetic so downstream code
+        never breaks during sprint work.
+        """
+        import csv
+        from aegeanbench.sports.models import CompetitionStage
+
+        if not self.csv_path.exists():
+            logger.warning("Kaggle CSV not found at %s; using synthetic", self.csv_path)
+            return _synthetic_history(num_matches)
+
+        matches: List[Match] = []
+        try:
+            with self.csv_path.open() as f:
+                reader = csv.DictReader(f)
+                for i, row in enumerate(reader):
+                    if i >= num_matches:
+                        break
+                    try:
+                        date_str = row.get("date", "")
+                        kickoff = datetime.strptime(date_str, "%Y-%m-%d")
+                        home_name = row.get("home_team", "").strip()
+                        away_name = row.get("away_team", "").strip()
+                        home_goals = int(row.get("home_score", 0))
+                        away_goals = int(row.get("away_score", 0))
+                    except (ValueError, TypeError) as e:
+                        logger.debug("skipping kaggle row %s: %s", i, e)
+                        continue
+                    matches.append(
+                        Match(
+                            match_id=f"HIST-{date_str}-{home_name}-{away_name}",
+                            competition=row.get("tournament", "International"),
+                            stage=CompetitionStage.FRIENDLY,
+                            kickoff_at=kickoff,
+                            home_team=Team(home_name[:3].upper(), home_name),
+                            away_team=Team(away_name[:3].upper(), away_name),
+                            result=MatchResult(home_goals=home_goals, away_goals=away_goals),
+                        )
+                    )
+        except OSError as e:
+            logger.warning("Kaggle CSV read failed (%s); using synthetic", e)
+            return _synthetic_history(num_matches)
+
+        if not matches:
+            logger.warning("Kaggle CSV produced 0 matches; using synthetic")
+            return _synthetic_history(num_matches)
+        logger.info("Kaggle: loaded %d historical matches from %s", len(matches), self.csv_path)
+        return matches
+
+
+def download_kaggle_dataset(dest: Optional[Path] = None) -> Path:
+    """
+    Helper that documents the manual download flow for the sprint.
+
+    Kaggle requires authenticated downloads via their CLI. We do not
+    automate that here because:
+      1. It needs a kaggle.json credential file
+      2. The dataset rarely changes (it's a historical archive)
+
+    Instead this function checks whether the file is in the expected
+    location and prints exact instructions if not.
+
+    Usage:
+        from aegeanbench.sports.sources.kaggle_loader import download_kaggle_dataset
+        path = download_kaggle_dataset()
+    """
+    target = dest or DEFAULT_DATA_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        logger.info("Kaggle dataset already present at %s", target)
+        return target
+    logger.warning(
+        "Kaggle dataset not found.\n"
+        "  Run:\n"
+        "    pip install kaggle\n"
+        "    kaggle datasets download -d martj42/international-football-results-from-1872-to-2017 "
+        "      -p %s --unzip\n"
+        "  Or download manually from "
+        "https://www.kaggle.com/datasets/martj42/international-football-results-from-1872-to-2017 "
+        "and place results.csv at %s",
+        target.parent, target,
+    )
+    return target

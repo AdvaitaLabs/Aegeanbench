@@ -167,11 +167,51 @@ class FootballDataAdapter(SourceAdapter):
             return _mock_team_history(fifa_code, last_n)
         return self._real_fetch_team_history(fifa_code, last_n, policy)
 
-    # ---------- real API (stub for now; full impl when key arrives) ----------
+    # ---------- real API (live HTTP path) ----------
+    #
+    # football-data.org reference:
+    #   GET /v4/competitions/{code}/teams    free tier covers WC, EC, ...
+    #   GET /v4/competitions/{code}/matches  paginated, supports date filters
+    # Auth: X-Auth-Token header, free key = 10 req/min
+    # Competition codes: WC for World Cup, EC for European Championship.
+
+    COMPETITION_CODES = {
+        "FIFA World Cup 2026": "WC",
+        "FIFA World Cup": "WC",
+        "WC": "WC",
+        "UEFA Euro 2024": "EC",
+        "EC": "EC",
+    }
+
+    def _competition_code(self, competition: str) -> str:
+        return self.COMPETITION_CODES.get(competition, competition.upper())
+
+    def _headers(self) -> dict:
+        return {"X-Auth-Token": self.api_key} if self.api_key else {}
 
     def _real_fetch_teams(self, competition: str, policy: FetchPolicy) -> List[Team]:
-        logger.warning("football_data real fetch_teams not yet implemented; falling back to mock")
-        return list(WORLDCUP_2026_TEAMS_MOCK)
+        import requests
+        code = self._competition_code(competition)
+        url = f"{API_BASE}/competitions/{code}/teams"
+        try:
+            resp = requests.get(url, headers=self._headers(), timeout=policy.timeout_seconds)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.warning("football_data fetch_teams failed (%s); falling back to mock", e)
+            return list(WORLDCUP_2026_TEAMS_MOCK)
+
+        teams: List[Team] = []
+        for raw in data.get("teams", []):
+            fifa_code = (raw.get("tla") or raw.get("shortName") or "").upper()
+            name = raw.get("name") or fifa_code
+            if not fifa_code:
+                continue
+            teams.append(Team(fifa_code=fifa_code, name=name))
+        if not teams:
+            logger.warning("football_data returned 0 teams; using mock")
+            return list(WORLDCUP_2026_TEAMS_MOCK)
+        return teams
 
     def _real_fetch_fixtures(
         self,
@@ -180,11 +220,79 @@ class FootballDataAdapter(SourceAdapter):
         to_date: Optional[datetime],
         policy: FetchPolicy,
     ) -> List[Match]:
-        logger.warning("football_data real fetch_fixtures not yet implemented; falling back to mock")
-        return _mock_fixtures()
+        import requests
+        code = self._competition_code(competition)
+        url = f"{API_BASE}/competitions/{code}/matches"
+        params: dict = {}
+        if from_date:
+            params["dateFrom"] = from_date.strftime("%Y-%m-%d")
+        if to_date:
+            params["dateTo"] = to_date.strftime("%Y-%m-%d")
+        try:
+            resp = requests.get(
+                url, headers=self._headers(), params=params,
+                timeout=policy.timeout_seconds,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.warning("football_data fetch_fixtures failed (%s); falling back to mock", e)
+            return _mock_fixtures()
+
+        return self._parse_fixtures(data.get("matches", []), competition)
 
     def _real_fetch_team_history(
         self, fifa_code: str, last_n: int, policy: FetchPolicy
     ) -> List[Match]:
-        logger.warning("football_data real fetch_team_history not yet implemented; falling back to mock")
+        """Free tier: /v4/teams/{id}/matches is restricted; degrade to mock."""
+        logger.info("football_data team history requires paid tier; using mock for %s", fifa_code)
         return _mock_team_history(fifa_code, last_n)
+
+    @staticmethod
+    def _parse_fixtures(rows: list, competition: str) -> List[Match]:
+        """Convert raw football-data /matches rows into our Match dataclass."""
+        out: List[Match] = []
+        for r in rows:
+            home_raw = r.get("homeTeam") or {}
+            away_raw = r.get("awayTeam") or {}
+            home_code = (home_raw.get("tla") or home_raw.get("shortName") or "").upper()
+            away_code = (away_raw.get("tla") or away_raw.get("shortName") or "").upper()
+            if not home_code or not away_code:
+                continue
+            kickoff_str = r.get("utcDate") or r.get("kickoff")
+            try:
+                kickoff = datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
+            except (AttributeError, ValueError):
+                kickoff = datetime.utcnow()
+
+            stage_raw = (r.get("stage") or "").upper()
+            stage_map = {
+                "GROUP_STAGE": CompetitionStage.GROUP,
+                "LAST_16": CompetitionStage.ROUND_OF_16,
+                "QUARTER_FINALS": CompetitionStage.QUARTER_FINAL,
+                "SEMI_FINALS": CompetitionStage.SEMI_FINAL,
+                "THIRD_PLACE": CompetitionStage.THIRD_PLACE,
+                "FINAL": CompetitionStage.FINAL,
+            }
+            stage = stage_map.get(stage_raw, CompetitionStage.GROUP)
+
+            result = None
+            score = (r.get("score") or {}).get("fullTime") or {}
+            home_goals = score.get("home")
+            away_goals = score.get("away")
+            if home_goals is not None and away_goals is not None:
+                result = MatchResult(home_goals=int(home_goals), away_goals=int(away_goals))
+
+            out.append(
+                Match(
+                    match_id=str(r.get("id") or f"{home_code}-{away_code}-{kickoff:%Y%m%d}"),
+                    competition=competition,
+                    stage=stage,
+                    kickoff_at=kickoff,
+                    home_team=Team(home_code, home_raw.get("name", home_code)),
+                    away_team=Team(away_code, away_raw.get("name", away_code)),
+                    venue=r.get("venue"),
+                    result=result,
+                )
+            )
+        return out
