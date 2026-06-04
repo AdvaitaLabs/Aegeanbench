@@ -26,6 +26,7 @@ from aegeanbench.core.models import (
     ConsensusOutcome,
     Difficulty,
     ExpectedDecision,
+    InvestmentMetrics,
     RiskMetrics,
 )
 from aegeanbench.metrics.engine import MetricsEngine
@@ -56,6 +57,8 @@ class MockRunner:
                 result = self._run_collaboration(case)
             elif case.category == BenchmarkCategory.RISK:
                 result = self._run_risk(case)
+            elif case.category == BenchmarkCategory.INVESTMENT:
+                result = self._run_investment(case)
             else:
                 result = self._error_result(case, "Unknown category")
         except Exception as exc:  # noqa: BLE001
@@ -195,6 +198,89 @@ class MockRunner:
                 "has_outlier_agent": case.has_outlier_agent,
                 "agent_answers": agent_answers,
                 "vote_counts": dict(vote_counts),
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # Investment simulation
+    # ──────────────────────────────────────────────────────────────
+
+    def _run_investment(self, case: BenchmarkCase) -> BenchmarkResult:
+        request = case.investment_request or {}
+        truth = case.investment_ground_truth
+        if truth is None:
+            return self._error_result(case, "Investment case missing ground truth")
+
+        asset = request.get("asset", {})
+        symbol = asset.get("symbol", "UNKNOWN")
+        facts = request.get("public_facts", [])
+        market_snapshot = request.get("market_snapshot", "")
+        prompt_size = len(market_snapshot) + sum(len(str(f)) for f in facts)
+
+        predicted_direction = truth.direction_label_20d
+        predicted_action = {
+            "bullish": "buy",
+            "bearish": "sell",
+            "neutral": "hold",
+        }.get(predicted_direction, "hold")
+
+        confidence = {
+            Difficulty.EASY: 0.82,
+            Difficulty.MEDIUM: 0.74,
+            Difficulty.HARD: 0.67,
+        }.get(case.difficulty, 0.70)
+
+        forward_return = float(truth.forward_return_20d or 0.0)
+        benchmark_return = float(truth.benchmark_return_20d or 0.0)
+        excess_return = forward_return - benchmark_return
+        max_drawdown = float(truth.max_drawdown_20d or 0.0)
+        risk_gate_triggered = predicted_direction == "bearish" or max_drawdown >= 0.10
+
+        final_answer = predicted_action
+        correct = predicted_direction == truth.direction_label_20d
+        tokens_prompt = 500 + prompt_size // 4
+        tokens_completion = 180
+
+        snapshot = AgentSnapshot(
+            agent_id="mock-investment-agent-0",
+            answer=predicted_action,
+            confidence=confidence,
+            reasoning=f"Historical mock recommendation for {symbol}",
+            latency_s=round(self.base_latency_s * self.rng.uniform(1.0, 1.6), 4),
+            tokens_prompt=tokens_prompt,
+            tokens_completion=tokens_completion,
+        )
+
+        inv_metrics = InvestmentMetrics(
+            predicted_action=predicted_action,
+            predicted_direction=predicted_direction,
+            confidence=confidence,
+            ground_truth_direction=truth.direction_label_20d,
+            direction_correct=correct,
+            forward_return_20d=forward_return,
+            benchmark_return_20d=benchmark_return,
+            excess_return_20d=excess_return,
+            max_drawdown_20d=max_drawdown,
+            risk_gate_triggered=risk_gate_triggered,
+        )
+
+        return BenchmarkResult(
+            case_id=case.case_id,
+            case_name=case.name,
+            category=case.category,
+            difficulty=case.difficulty,
+            outcome=ConsensusOutcome.CONVERGED,
+            correct=correct,
+            final_answer=final_answer,
+            tokens_prompt=tokens_prompt,
+            tokens_completion=tokens_completion,
+            tokens_saved=0,
+            agent_snapshots=[snapshot],
+            investment_metrics=inv_metrics,
+            raw_output={
+                "symbol": symbol,
+                "historical_context_attached": case.historical_context is not None,
+                "ground_truth_direction": truth.direction_label_20d,
             },
         )
 

@@ -26,6 +26,7 @@ class BenchmarkCategory(str, Enum):
     COLLABORATION = "collaboration"
     HYBRID        = "hybrid"
     RISK          = "risk"
+    INVESTMENT    = "investment"
 
 
 class Difficulty(str, Enum):
@@ -148,6 +149,43 @@ class RiskMetrics(BaseModel):
     tokens_saved_by_prescreen: int = 0  # tokens NOT spent because pre-screen fired
 
 
+class InvestmentGroundTruth(BaseModel):
+    """Future realized outcomes used to score historical investment cases."""
+    forward_return_5d: Optional[float] = None
+    forward_return_20d: Optional[float] = None
+    forward_return_60d: Optional[float] = None
+    benchmark_return_5d: Optional[float] = None
+    benchmark_return_20d: Optional[float] = None
+    benchmark_return_60d: Optional[float] = None
+    max_drawdown_20d: Optional[float] = None
+    realized_vol_20d: Optional[float] = None
+    direction_label_20d: str = "neutral"
+
+
+class HistoricalMarketContext(BaseModel):
+    """Point-in-time market context exposed to the investment benchmark."""
+    market: Dict[str, Any] = Field(default_factory=dict)
+    fundamentals: Dict[str, Any] = Field(default_factory=dict)
+    news: List[Dict[str, Any]] = Field(default_factory=list)
+    public_facts: List[str] = Field(default_factory=list)
+    provider_status: Dict[str, Any] = Field(default_factory=dict)
+    provider_signals: List[str] = Field(default_factory=list)
+
+
+class InvestmentMetrics(BaseModel):
+    """Per-case metrics for historical investment backtests."""
+    predicted_action: str = ""
+    predicted_direction: str = "neutral"
+    confidence: float = 0.0
+    ground_truth_direction: str = "neutral"
+    direction_correct: bool = False
+    forward_return_20d: float = 0.0
+    benchmark_return_20d: float = 0.0
+    excess_return_20d: float = 0.0
+    max_drawdown_20d: float = 0.0
+    risk_gate_triggered: bool = False
+
+
 # ─────────────────────────────────────────────
 # Benchmark Case
 # ─────────────────────────────────────────────
@@ -178,6 +216,11 @@ class BenchmarkCase(BaseModel):
     risk_payload:        Optional[Dict[str, Any]]  = None
     expected_decision:   Optional[ExpectedDecision] = None
     expected_risk_level: Optional[str]             = None
+
+    # Investment backtest input
+    investment_request: Optional[Dict[str, Any]] = None
+    historical_context: Optional[HistoricalMarketContext] = None
+    investment_ground_truth: Optional[InvestmentGroundTruth] = None
 
     # Adversarial flags
     has_outlier_agent: bool          = False
@@ -217,6 +260,7 @@ class BenchmarkResult(BaseModel):
     consensus_metrics:     Optional[ConsensusMetrics]   = None
     collaboration_metrics: Optional[CollaborationMetrics] = None
     risk_metrics:          Optional[RiskMetrics]         = None
+    investment_metrics:    Optional[InvestmentMetrics]   = None
 
     raw_output: Dict[str, Any] = Field(default_factory=dict)
     error:      Optional[str]  = None
@@ -294,6 +338,13 @@ class BenchmarkSuiteResult(BaseModel):
     risk_f1_reject:           float = 0.0
     mean_validator_agreement: float = 0.0
     pre_screen_rate:          float = 0.0
+
+    # Investment
+    investment_direction_accuracy: float = 0.0
+    investment_avg_forward_return_20d: float = 0.0
+    investment_avg_excess_return_20d: float = 0.0
+    investment_avg_max_drawdown_20d: float = 0.0
+    investment_risk_gate_rate: float = 0.0
 
     # Per-result list
     results:   List[BenchmarkResult] = Field(default_factory=list)

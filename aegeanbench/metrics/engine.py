@@ -169,6 +169,36 @@ class MetricsEngine:
                 lambda r: r.risk_metrics.actual_decision or "",
             )
 
+        # ── Investment metrics ───────────────────────────────────
+        investment_results = [
+            r for r in results
+            if r.category == BenchmarkCategory.INVESTMENT and r.investment_metrics is not None
+        ]
+
+        investment_direction_accuracy = 0.0
+        investment_avg_forward_return_20d = 0.0
+        investment_avg_excess_return_20d = 0.0
+        investment_avg_max_drawdown_20d = 0.0
+        investment_risk_gate_rate = 0.0
+
+        if investment_results:
+            n = len(investment_results)
+            investment_direction_accuracy = sum(
+                1 for r in investment_results if r.investment_metrics.direction_correct
+            ) / n
+            investment_avg_forward_return_20d = sum(
+                r.investment_metrics.forward_return_20d for r in investment_results
+            ) / n
+            investment_avg_excess_return_20d = sum(
+                r.investment_metrics.excess_return_20d for r in investment_results
+            ) / n
+            investment_avg_max_drawdown_20d = sum(
+                r.investment_metrics.max_drawdown_20d for r in investment_results
+            ) / n
+            investment_risk_gate_rate = sum(
+                1 for r in investment_results if r.investment_metrics.risk_gate_triggered
+            ) / n
+
         return BenchmarkSuiteResult(
             suite_id=suite_id,
             suite_name=suite_name,
@@ -208,6 +238,12 @@ class MetricsEngine:
             risk_f1_reject=round(risk_f1_reject, 4),
             mean_validator_agreement=round(mean_validator_agreement, 4),
             pre_screen_rate=round(pre_screen_rate, 4),
+            # investment
+            investment_direction_accuracy=round(investment_direction_accuracy, 4),
+            investment_avg_forward_return_20d=round(investment_avg_forward_return_20d, 4),
+            investment_avg_excess_return_20d=round(investment_avg_excess_return_20d, 4),
+            investment_avg_max_drawdown_20d=round(investment_avg_max_drawdown_20d, 4),
+            investment_risk_gate_rate=round(investment_risk_gate_rate, 4),
             results=results,
         )
 

@@ -1,0 +1,23 @@
+# Plan files (local only, do not commit)
+plan_*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local data cache
+*.parquet
+data_cache/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Output
+outputs/
+results/*.json

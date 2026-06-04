@@ -10,6 +10,8 @@ Tests:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from aegeanbench.core.models import (
     BenchmarkCategory,
@@ -21,6 +23,8 @@ from aegeanbench.datasets import (
     load_consensus_suite,
     load_collaboration_suite,
     load_risk_suite,
+    load_investment_cases_from_file,
+    load_investment_suite,
     load_full_suite,
 )
 from aegeanbench.metrics.engine import MetricsEngine
@@ -60,12 +64,30 @@ class TestDatasetLoading:
             assert case.expected_decision is not None
             assert case.risk_payload is not None
 
+    def test_investment_suite_loads(self):
+        suite = load_investment_suite()
+        assert len(suite.cases) > 0
+        for case in suite.cases:
+            assert case.case_id.startswith("INV-")
+            assert case.category == BenchmarkCategory.INVESTMENT
+            assert case.investment_request is not None
+            assert case.historical_context is not None
+            assert case.investment_ground_truth is not None
+
+    def test_investment_suite_loads_from_file(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "investment_cases.json"
+        suite = load_investment_cases_from_file(str(fixture_path))
+        assert len(suite.cases) == 1
+        assert suite.cases[0].case_id == "INV-FILE-001"
+        assert suite.cases[0].category == BenchmarkCategory.INVESTMENT
+
     def test_full_suite_combines_all(self):
         full       = load_full_suite()
         consensus  = load_consensus_suite()
         collab     = load_collaboration_suite()
         risk       = load_risk_suite()
-        expected   = len(consensus.cases) + len(collab.cases) + len(risk.cases)
+        investment = load_investment_suite()
+        expected   = len(consensus.cases) + len(collab.cases) + len(risk.cases) + len(investment.cases)
         assert len(full.cases) == expected
 
     def test_suite_filter_by_category(self):
@@ -205,6 +227,31 @@ class TestMockRunnerRisk:
 
 
 # ─────────────────────────────────────────────
+# MockRunner — investment cases
+# ─────────────────────────────────────────────
+
+class TestMockRunnerInvestment:
+    def setup_method(self):
+        self.runner = MockRunner(seed=42)
+
+    def test_investment_case_runs(self):
+        suite = load_investment_suite()
+        result = self.runner.run_case(suite.cases[0])
+        assert result.correct is True
+        assert result.investment_metrics is not None
+        assert result.investment_metrics.direction_correct is True
+
+    def test_investment_metrics_populated(self):
+        suite = load_investment_suite()
+        result = self.runner.run_case(suite.cases[1])
+        metrics = result.investment_metrics
+        assert metrics is not None
+        assert metrics.predicted_action in {"buy", "hold", "sell"}
+        assert isinstance(metrics.excess_return_20d, float)
+        assert result.final_answer in {"buy", "hold", "sell"}
+
+
+# ─────────────────────────────────────────────
 # MetricsEngine
 # ─────────────────────────────────────────────
 
@@ -232,6 +279,11 @@ class TestMetricsEngine:
         sr = self.engine.aggregate("test-suite", "Test", self.results)
         assert 0.0 <= sr.risk_f1_approve <= 1.0
         assert 0.0 <= sr.risk_f1_reject  <= 1.0
+
+    def test_investment_metrics_populated(self):
+        sr = self.engine.aggregate("test-suite", "Test", self.results)
+        assert 0.0 <= sr.investment_direction_accuracy <= 1.0
+        assert isinstance(sr.investment_avg_excess_return_20d, float)
 
     def test_breakdown_by_difficulty(self):
         breakdown = self.engine.breakdown_by_difficulty(self.results)

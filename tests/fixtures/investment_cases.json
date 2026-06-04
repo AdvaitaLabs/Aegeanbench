@@ -1,0 +1,73 @@
+[
+  {
+    "case_id": "INV-FILE-001",
+    "name": "Fixture case from external file",
+    "description": "Used to verify JSON dataset loading for investment benchmark cases.",
+    "category": "investment",
+    "difficulty": "easy",
+    "tags": ["investment", "fixture"],
+    "investment_request": {
+      "mode": "auto",
+      "asset": {
+        "symbol": "NVDA",
+        "market": "US",
+        "asset_type": "equity",
+        "display_name": "NVIDIA Corp."
+      },
+      "timeframe": {
+        "analysis_date": "2024-05-01T00:00:00Z",
+        "lookback_window_days": 90,
+        "horizon": "1m"
+      },
+      "risk_profile": "balanced",
+      "objective": "alpha",
+      "market_snapshot": "Momentum remains strong after AI infrastructure demand surprises to the upside.",
+      "public_facts": [
+        "Revenue growth remains exceptional.",
+        "Positioning is crowded and volatility can spike around earnings."
+      ],
+      "metadata": {
+        "benchmark_case_id": "INV-FILE-001"
+      }
+    },
+    "historical_context": {
+      "market": {
+        "price": 830.12,
+        "change_pct": 0.018
+      },
+      "fundamentals": {
+        "pe_ttm": 62.4,
+        "revenue_growth": 0.84
+      },
+      "news": [
+        {
+          "title": "AI server demand accelerates again",
+          "source": "Reuters",
+          "provider": "fixture",
+          "polarity": "supportive"
+        }
+      ],
+      "public_facts": [
+        "Hyperscaler capex continues to trend higher."
+      ],
+      "provider_status": {
+        "fixture": {
+          "status": "ok",
+          "signals": []
+        }
+      },
+      "provider_signals": []
+    },
+    "investment_ground_truth": {
+      "forward_return_20d": 0.092,
+      "benchmark_return_20d": 0.021,
+      "max_drawdown_20d": 0.041,
+      "realized_vol_20d": 0.33,
+      "direction_label_20d": "bullish"
+    },
+    "metadata": {
+      "benchmark_index": "SPY"
+    }
+  }
+]
+

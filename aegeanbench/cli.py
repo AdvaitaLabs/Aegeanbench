@@ -40,7 +40,7 @@ from aegeanbench.core.models import (
     BenchmarkSuiteResult,
     Difficulty,
 )
-from aegeanbench.datasets import load_full_suite
+from aegeanbench.datasets import load_full_suite, load_investment_cases_from_file
 from aegeanbench.metrics.engine import MetricsEngine
 
 
@@ -125,6 +125,16 @@ def print_suite_summary(suite_result: BenchmarkSuiteResult, engine: MetricsEngin
         print(f"  validator_agreement: {suite_result.mean_validator_agreement:.3f}")
         print(f"  pre_screen_rate:     {suite_result.pre_screen_rate:.1%}")
 
+    # Investment metrics
+    inv = [r for r in results if r.investment_metrics]
+    if inv:
+        print(c("cyan", "\n  [Investment Backtest Metrics]"))
+        print(f"  direction_accuracy:  {suite_result.investment_direction_accuracy:.1%}")
+        print(f"  avg_fwd_return_20d:  {suite_result.investment_avg_forward_return_20d:.2%}")
+        print(f"  avg_excess_return:   {suite_result.investment_avg_excess_return_20d:.2%}")
+        print(f"  avg_max_drawdown:    {suite_result.investment_avg_max_drawdown_20d:.2%}")
+        print(f"  risk_gate_rate:      {suite_result.investment_risk_gate_rate:.1%}")
+
     # By difficulty
     print(c("cyan", "\n  [By Difficulty]"))
     for diff, stats in engine.breakdown_by_difficulty(results).items():
@@ -151,7 +161,7 @@ def print_suite_summary(suite_result: BenchmarkSuiteResult, engine: MetricsEngin
 def cmd_run(args: argparse.Namespace) -> None:
     print_banner()
 
-    suite = load_full_suite()
+    suite = load_investment_cases_from_file(args.dataset_file) if args.dataset_file else load_full_suite()
     cases = suite.cases
 
     # Filters
@@ -236,7 +246,7 @@ def _print_token_summary(suite_result: BenchmarkSuiteResult) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    suite = load_full_suite()
+    suite = load_investment_cases_from_file(args.dataset_file) if args.dataset_file else load_full_suite()
     cases = suite.cases
 
     if args.category:
@@ -257,7 +267,7 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_show(args: argparse.Namespace) -> None:
-    suite = load_full_suite()
+    suite = load_investment_cases_from_file(args.dataset_file) if args.dataset_file else load_full_suite()
     matches = [c for c in suite.cases if c.case_id == args.case_id]
     if not matches:
         print(c("red", f"Case '{args.case_id}' not found."))
@@ -294,6 +304,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Run a single case by ID")
     run_p.add_argument("--output-dir", default="results", dest="output_dir",
                        help="Directory to save JSON results (default: results)")
+    run_p.add_argument("--dataset-file", default=None, dest="dataset_file",
+                       help="Optional JSON/JSONL case file to load instead of built-in suites")
     run_p.add_argument("--seed",       default=42,        type=int,
                        help="Random seed for mock runner")
 
@@ -303,10 +315,14 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=[e.value for e in BenchmarkCategory])
     lst_p.add_argument("--difficulty", default=None,
                        choices=[e.value for e in Difficulty])
+    lst_p.add_argument("--dataset-file", default=None, dest="dataset_file",
+                       help="Optional JSON/JSONL case file to load instead of built-in suites")
 
     # show
     show_p = sub.add_parser("show", help="Show details of a single case")
     show_p.add_argument("case_id", help="Case ID, e.g. C-HARD-001")
+    show_p.add_argument("--dataset-file", default=None, dest="dataset_file",
+                        help="Optional JSON/JSONL case file to load instead of built-in suites")
 
     return parser
 
