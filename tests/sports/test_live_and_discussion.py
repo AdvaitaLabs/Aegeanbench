@@ -138,6 +138,94 @@ class TestScheduler:
 
 
 class TestDiscussionTrace:
+    def test_parse_real_aegean_response_with_discussion_rounds(self):
+        """
+        Verify we correctly parse the actual GroupConsensusResult shape
+        returned by aegean-consensus (discussion_rounds, not rounds_history).
+        """
+        import json
+        from aegeanbench.sports.discussion import parse_aegean_response_to_trace
+
+        # This mirrors the JSON aegean-consensus emits at
+        # POST /api/v1/groups/{id}/consensus
+        consensus_response = {
+            "consensus_id": "c1",
+            "success": True,
+            "rounds_used": 2,
+            "consensus_reached": True,
+            "weighted_votes": {"home_win": 1.75},
+            "consensus_path": ["stats_specialist", "market_specialist"],
+            "final_solution": {
+                "agent_id": "stats_specialist",
+                "answer": json.dumps({"p_home_win": 0.55, "p_draw": 0.28, "p_away_win": 0.17}),
+                "confidence": 0.72,
+                "reasoning": "Home edge from xG",
+            },
+            "discussion_rounds": [
+                {
+                    "round_number": 1,
+                    "agent_responses": {
+                        "stats_specialist": {
+                            "agent_id": "stats_specialist",
+                            "answer": json.dumps({
+                                "p_home_win": 0.5, "p_draw": 0.3, "p_away_win": 0.2,
+                            }),
+                            "confidence": 0.7,
+                            "reasoning": "xG favours home",
+                        },
+                        "market_specialist": {
+                            "agent_id": "market_specialist",
+                            "answer": json.dumps({
+                                "p_home_win": 0.4, "p_draw": 0.3, "p_away_win": 0.3,
+                            }),
+                            "confidence": 0.6,
+                            "reasoning": "Market sees a closer game",
+                        },
+                    },
+                    "candidate_answer": None,
+                    "candidate_confidence": 0.0,
+                    "stability_counter": 1,
+                    "consensus_status": "ongoing",
+                },
+                {
+                    "round_number": 2,
+                    "agent_responses": {
+                        "stats_specialist": {
+                            "agent_id": "stats_specialist",
+                            "answer": json.dumps({
+                                "p_home_win": 0.55, "p_draw": 0.28, "p_away_win": 0.17,
+                            }),
+                            "confidence": 0.75,
+                            "reasoning": "Holding",
+                        },
+                        "market_specialist": {
+                            "agent_id": "market_specialist",
+                            "answer": json.dumps({
+                                "p_home_win": 0.5, "p_draw": 0.28, "p_away_win": 0.22,
+                            }),
+                            "confidence": 0.7,
+                            "reasoning": "Converged toward stats",
+                        },
+                    },
+                    "candidate_confidence": 0.65,
+                    "stability_counter": 2,
+                    "consensus_status": "reached",
+                },
+            ],
+        }
+        trace = parse_aegean_response_to_trace("M1", "aegean", consensus_response)
+        assert trace.rounds_used == 2
+        assert len(trace.rounds) == 2
+        # Both agents picked home_win each round so no position change
+        round2 = trace.rounds[1]
+        assert all(a.current_argmax == "home_win" for a in round2.agents)
+        # Second round should be marked as quorum reached
+        assert round2.quorum_reached is True
+        # raw metadata carries the consensus_path through
+        assert trace.raw_metadata["consensus_path"] == [
+            "stats_specialist", "market_specialist",
+        ]
+
     def test_parse_response_with_rounds_history(self):
         import json
         from aegeanbench.sports.discussion import parse_aegean_response_to_trace

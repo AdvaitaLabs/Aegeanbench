@@ -102,43 +102,65 @@ def parse_aegean_response_to_trace(
     consensus_response: Dict[str, Any],
 ) -> DiscussionTrace:
     """
-    Convert the raw JSON returned by aegean-consensus
+    Convert the GroupConsensusResult JSON returned by aegean-consensus
         POST /api/v1/groups/{id}/consensus
     into a DiscussionTrace.
 
-    The expected response shape (loosely typed):
+    The aegean-consensus API returns:
         {
           "consensus_id": "...",
           "success": true,
-          "final_solution": { "answer": "{...JSON...}", "confidence": 0.71 },
-          "weighted_votes": { "buy": 1.75, "hold": 0.62 },
+          "final_solution": { "answer": "...", "confidence": 0.71, "reasoning": "..." },
+          "weighted_votes": { "home_win": 1.75, "draw": 0.62 },
+          "consensus_path": ["agent_0", "agent_1"],
           "rounds_used": 2,
-          "rounds_history": [
+          "discussion_rounds": [
             {
               "round_number": 1,
-              "quorum_reached": false,
-              "agent_solutions": [
-                {"agent_id": "stats_specialist", "answer": "{...}", "confidence": 0.72, "reasoning": "..."}
-              ]
+              "agent_responses": {
+                "stats_specialist": {"agent_id": "...", "answer": "{...}", "confidence": 0.72, "reasoning": "..."},
+                ...
+              },
+              "candidate_answer": "...",
+              "candidate_confidence": 0.65,
+              "stability_counter": 1,
+              "consensus_status": "ongoing"
             },
             ...
           ]
         }
 
-    If rounds_history is absent (older aegean-consensus version) we still
-    construct a single-round trace from final_solution alone.
+    We also tolerate the legacy / SDK-direct field `rounds_history` for
+    callers that drive ConsensusCoordinator directly without going through
+    GroupChatService.
     """
-    rounds_history: List[Dict[str, Any]] = consensus_response.get("rounds_history") or []
+    raw_rounds: List[Dict[str, Any]] = (
+        consensus_response.get("discussion_rounds")
+        or consensus_response.get("rounds_history")
+        or []
+    )
     rounds: List[DiscussionRound] = []
-
     prev_argmax_per_agent: Dict[str, str] = {}
 
-    for raw in rounds_history:
+    for raw in raw_rounds:
+        # The two shapes:
+        #   discussion_rounds: agent_responses is a Dict[agent_id, Solution]
+        #   rounds_history:    agent_solutions is a List[Solution]
+        if "agent_responses" in raw:
+            solution_iter = raw["agent_responses"].items()
+            get_id = lambda item: item[0]
+            get_sol = lambda item: item[1]
+        else:
+            solution_iter = enumerate(raw.get("agent_solutions", []))
+            get_id = lambda item: item[1].get("agent_id", "")
+            get_sol = lambda item: item[1]
+
         agents_entries: List[DiscussionAgentEntry] = []
-        for sol in raw.get("agent_solutions", []):
+        for item in solution_iter:
+            agent_id = get_id(item)
+            sol = get_sol(item) or {}
             probs = _parse_probs(sol.get("answer", "{}"))
             argmax = _argmax(probs)
-            agent_id = sol.get("agent_id", "")
             prev = prev_argmax_per_agent.get(agent_id)
             agents_entries.append(
                 DiscussionAgentEntry(
@@ -156,12 +178,24 @@ def parse_aegean_response_to_trace(
             )
             prev_argmax_per_agent[agent_id] = argmax
 
+        # candidate_answer at the GroupConsensusResult level is raw answer
+        # text - convert it to our outcome label by extracting JSON if any
+        candidate_answer = raw.get("candidate_answer") or raw.get("candidate_outcome") or ""
+        candidate_probs = _parse_probs(candidate_answer) if "{" in str(candidate_answer) else {}
+        candidate_outcome = (
+            _argmax(candidate_probs) if candidate_probs
+            else str(candidate_answer)
+        )
+
         rounds.append(
             DiscussionRound(
                 round_number=int(raw.get("round_number", len(rounds) + 1)),
-                candidate_outcome=str(raw.get("candidate_outcome", "")),
-                candidate_confidence=float(raw.get("candidate_confidence", 0.0)),
-                quorum_reached=bool(raw.get("quorum_reached", False)),
+                candidate_outcome=candidate_outcome,
+                candidate_confidence=float(raw.get("candidate_confidence") or 0.0),
+                quorum_reached=bool(
+                    raw.get("consensus_status") in ("reached", "quorum_reached")
+                    or raw.get("quorum_reached")
+                ),
                 agents=agents_entries,
                 weighted_votes=raw.get("weighted_votes") or {},
                 agreement_points=raw.get("agreement_points") or [],
@@ -174,11 +208,12 @@ def parse_aegean_response_to_trace(
         match_id=match_id,
         runner_id=runner_id,
         enabled=True,
-        rounds_used=int(consensus_response.get("rounds_used", len(rounds))),
+        rounds_used=int(consensus_response.get("rounds_used") or len(rounds)),
         rounds=rounds,
         final_summary=str(final.get("reasoning", "")),
         raw_metadata={
-            "weighted_votes": consensus_response.get("weighted_votes", {}),
+            "weighted_votes": consensus_response.get("weighted_votes") or {},
+            "consensus_path": consensus_response.get("consensus_path") or [],
             "consensus_reached": consensus_response.get("consensus_reached", False),
         },
     )
