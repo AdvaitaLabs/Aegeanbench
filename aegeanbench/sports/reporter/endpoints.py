@@ -346,6 +346,173 @@ def build_match_detail_endpoint(
 # ----------------------------- runner card -----------------------------
 
 
+def build_dashboard_endpoint(
+    runs: Iterable[Dict[str, Any]],
+    tournament_id: str = "fifa-world-cup-2026",
+    max_recent_runs: int = 5,
+) -> Dict[str, Any]:
+    """
+    One-stop endpoint for the front-end home page.
+
+    Bundles leaderboard + most recent runs + last evaluated runner stats
+    into a single payload so the front-end can render the dashboard
+    without making 5 parallel calls.
+
+    Returns:
+        {
+          "leaderboard": <build_leaderboard_endpoint output>,
+          "recent_runs": [{run_id, label, created_at, n_matches, runner_ids}, ...],
+          "top_runner_card": {runner_id, lifetime: {...}},
+          "summary_stats": {
+              "total_runs": int,
+              "total_predictions": int,
+              "total_bets": int,
+              "betting_roi_lifetime": float | None,
+          }
+        }
+    """
+    runs_list = list(runs)
+    leaderboard = build_leaderboard_endpoint(runs_list, tournament_id=tournament_id)
+
+    # Recent runs - just the manifest essentials
+    recent: List[Dict[str, Any]] = []
+    for run in sorted(
+        runs_list,
+        key=lambda r: r.get("manifest", {}).get("created_at", ""),
+        reverse=True,
+    )[:max_recent_runs]:
+        m = run.get("manifest", {})
+        recent.append({
+            "run_id": m.get("run_id"),
+            "label": m.get("label"),
+            "created_at": m.get("created_at"),
+            "n_matches": m.get("n_matches"),
+            "runner_ids": m.get("runner_ids", []),
+            "has_evaluation": bool(run.get("evaluation")),
+        })
+
+    # Lifetime stats - cheap aggregations
+    total_predictions = 0
+    total_bets = 0
+    total_stake = 0.0
+    total_returned = 0.0
+    for run in runs_list:
+        for preds in (run.get("predictions") or {}).values():
+            total_predictions += len(preds)
+        portfolio = run.get("portfolio") or {}
+        bets = portfolio.get("bets") or []
+        total_bets += len(bets)
+        eval_data = run.get("evaluation") or {}
+        bet_eval = eval_data.get("betting_evaluation")
+        if bet_eval:
+            total_stake += float(bet_eval.get("total_stake", 0))
+            total_returned += float(bet_eval.get("total_returned", 0))
+
+    lifetime_roi = (
+        (total_returned - total_stake) / total_stake
+        if total_stake > 0 else None
+    )
+
+    # Top runner card - just the rank-1 entry
+    top_card = None
+    if leaderboard["rows"]:
+        top_runner_id = leaderboard["rows"][0]["runner_id"]
+        top_card = build_runner_card_endpoint(runs_list, top_runner_id)
+
+    return {
+        "_meta": {
+            "endpoint": "GET /api/v1/dashboard",
+            "description": "Single-call home-page payload (leaderboard + recent + stats)",
+        },
+        "tournament_id": tournament_id,
+        "leaderboard": leaderboard,
+        "recent_runs": recent,
+        "top_runner_card": top_card,
+        "summary_stats": {
+            "total_runs": len(runs_list),
+            "total_predictions": total_predictions,
+            "total_bets": total_bets,
+            "betting_roi_lifetime": (
+                round(lifetime_roi, 4) if lifetime_roi is not None else None
+            ),
+        },
+    }
+
+
+def build_match_state_endpoint(
+    runs: Iterable[Dict[str, Any]],
+    match_id: str,
+    live_state: Optional[Dict[str, Any]] = None,
+    live_events: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    One-stop endpoint for the per-match drill-down page.
+
+    Combines:
+      - the latest run that includes this match
+      - every predictor's call for this match
+      - the Aegean discussion trace (multi-round refinement)
+      - bets placed on this match
+      - per-match evaluation if available
+      - optional live state (current score, minute, recent events)
+
+    Front-end uses this single call to render the per-match page.
+    """
+    runs_list = list(runs)
+    # Find the most recent run that includes this match_id
+    latest_run = None
+    for run in sorted(
+        runs_list,
+        key=lambda r: r.get("manifest", {}).get("created_at", ""),
+        reverse=True,
+    ):
+        preds = run.get("predictions") or {}
+        if any(
+            any(p.get("match_id") == match_id for p in pred_list)
+            for pred_list in preds.values()
+        ):
+            latest_run = run
+            break
+
+    if latest_run is None:
+        return None
+
+    match_detail = build_match_detail_endpoint(latest_run, match_id)
+    if match_detail is None:
+        return None
+
+    # Pull the discussion trace from the Aegean prediction if present
+    discussion: Optional[Dict[str, Any]] = None
+    aegean_pred = next(
+        (p for p in match_detail["predictions_per_predictor"]
+         if p.get("runner_id") == "aegean"),
+        None,
+    )
+    if aegean_pred:
+        # The discussion lives in the prediction's metadata.discussion
+        # We have to dig into the source run.predictions["aegean"] entry
+        aegean_predictions = (latest_run.get("predictions") or {}).get("aegean", [])
+        for p in aegean_predictions:
+            if p.get("match_id") == match_id:
+                discussion = (p.get("metadata") or {}).get("discussion")
+                break
+
+    return {
+        "_meta": {
+            "endpoint": "GET /api/v1/matches/{match_id}/state",
+            "description": "Single-call match drill-down with live state",
+        },
+        "match_id": match_id,
+        "run_id": latest_run.get("manifest", {}).get("run_id"),
+        "predictions": match_detail["predictions_per_predictor"],
+        "discussion": discussion,
+        "bets": match_detail.get("bets_on_match", []),
+        "evaluation": match_detail.get("evaluation_per_predictor", []),
+        "live_state": live_state,
+        "live_events": live_events or [],
+    }
+
+
 def build_runner_card_endpoint(
     runs: Iterable[Dict[str, Any]],
     runner_id: str,

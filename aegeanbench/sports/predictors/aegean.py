@@ -162,6 +162,15 @@ class AegeanPredictor(Predictor):
                 float(parsed.get("p_away_win", 0)),
             )
             latency_ms = int((time.perf_counter() - start) * 1000)
+
+            # Capture the full multi-round discussion for the front-end
+            from aegeanbench.sports.discussion import parse_aegean_response_to_trace
+            discussion = parse_aegean_response_to_trace(
+                match_id=ctx.match.match_id,
+                runner_id=self.runner_id,
+                consensus_response=result,
+            )
+
             return Prediction(
                 match_id=ctx.match.match_id,
                 runner_id=self.runner_id,
@@ -177,6 +186,7 @@ class AegeanPredictor(Predictor):
                     "rounds_used": result.get("rounds_used", 0),
                     "weighted_votes": result.get("weighted_votes", {}),
                     "agent_types": self.agent_types,
+                    "discussion": discussion.to_dict(),
                 },
             )
         finally:
@@ -260,6 +270,56 @@ class AegeanPredictor(Predictor):
         confidence = max(0.4, 0.9 - avg_spread * 10)  # heuristic
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+
+        # Build a synthetic two-round DiscussionTrace from the per-agent
+        # samples we just generated, so the front-end has consistent data
+        # to render whether we're in mock or live mode.
+        from aegeanbench.sports.discussion import (
+            DiscussionAgentEntry,
+            DiscussionRound,
+            DiscussionTrace,
+        )
+        round1_agents: List[DiscussionAgentEntry] = []
+        for agent_type, (probs, weight) in zip(self.agent_types, agent_predictions):
+            argmax = max(probs.items(), key=lambda kv: kv[1])[0]
+            round1_agents.append(
+                DiscussionAgentEntry(
+                    agent_id=agent_type,
+                    role=agent_type,
+                    p_home_win=probs["home_win"],
+                    p_draw=probs["draw"],
+                    p_away_win=probs["away_win"],
+                    confidence=round(weight, 2),
+                    rationale=f"[mock {agent_type}] lens-specific reasoning",
+                    current_argmax=argmax,
+                )
+            )
+        # Round 2 = convergence (everyone aligned to weighted average)
+        consensus_argmax = max(
+            ("home_win", p_home), ("draw", p_draw), ("away_win", p_away),
+            key=lambda x: x[1],
+        )[0]
+        discussion = DiscussionTrace(
+            match_id=ctx.match.match_id,
+            runner_id=self.runner_id,
+            enabled=True,
+            rounds_used=2,
+            rounds=[
+                DiscussionRound(
+                    round_number=1,
+                    candidate_outcome=consensus_argmax,
+                    candidate_confidence=round(confidence, 3),
+                    quorum_reached=True,
+                    agents=round1_agents,
+                    weighted_votes=weighted_votes,
+                ),
+            ],
+            final_summary=(
+                f"Mock consensus across {len(self.agent_types)} agents; "
+                f"final outcome {consensus_argmax}."
+            ),
+        )
+
         return Prediction(
             match_id=ctx.match.match_id,
             runner_id=self.runner_id,
@@ -279,5 +339,6 @@ class AegeanPredictor(Predictor):
                 "weighted_votes": weighted_votes,
                 "agent_types": list(self.agent_types),
                 "agent_count": len(self.agent_types),
+                "discussion": discussion.to_dict(),
             },
         )

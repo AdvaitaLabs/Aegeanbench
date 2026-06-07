@@ -56,8 +56,10 @@ from aegeanbench.sports.orchestrator.persistence import (
 )
 from aegeanbench.sports.reporter.endpoints import (
     RUNNER_REGISTRY,
+    build_dashboard_endpoint,
     build_leaderboard_endpoint,
     build_match_detail_endpoint,
+    build_match_state_endpoint,
     build_run_endpoint,
     build_runner_card_endpoint,
     build_runners_endpoint,
@@ -171,6 +173,40 @@ def create_app(
         if runner_id not in RUNNER_REGISTRY:
             raise HTTPException(status_code=404, detail=f"unknown runner {runner_id}")
         return build_runner_card_endpoint(_all_runs(), runner_id)
+
+    # ---------- bundle endpoints (reduce frontend chattiness) ----------
+
+    @app.get("/api/v1/dashboard")
+    def get_dashboard(tournament_id: str = "fifa-world-cup-2026"):
+        """One-call home-page payload: leaderboard + recent runs + stats."""
+        return build_dashboard_endpoint(_all_runs(), tournament_id=tournament_id)
+
+    @app.get("/api/v1/matches/{match_id}/state")
+    def get_match_state(match_id: str):
+        """One-call match drill-down: predictions + discussion + bets + live state."""
+        # Best-effort live state from soccersapi (mock-safe)
+        live_state = None
+        live_events = []
+        try:
+            from aegeanbench.sports.sources.soccersapi_live import SoccersAPILiveClient
+            client = SoccersAPILiveClient()
+            matches = client.fetch_live_matches()
+            for m in matches:
+                if m.match_id == match_id:
+                    live_state = m.to_dict()
+                    live_events = [e.to_dict() for e in client.fetch_match_events(match_id)]
+                    break
+        except Exception as e:
+            logger.warning("live state fetch failed for %s: %s", match_id, e)
+        payload = build_match_state_endpoint(
+            _all_runs(),
+            match_id,
+            live_state=live_state,
+            live_events=live_events,
+        )
+        if payload is None:
+            raise HTTPException(status_code=404, detail=f"no data for match {match_id}")
+        return payload
 
     @app.get("/api/v1/health")
     def health():
