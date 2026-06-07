@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import random
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 # Templates seeded per locale; weighted so most messages are casual rather
@@ -98,8 +98,16 @@ class MockChatFetcher:
         # Allow tests to inject a fixed anchor; otherwise use now().
         self.timestamp_ref = timestamp_ref
 
-    def fetch(self, match_id: str, window_minutes: int = 30) -> Dict[str, Any]:
-        rng = _seeded_random(match_id)
+    def fetch(
+        self,
+        match_id: str,
+        window_minutes: int = 30,
+        room_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        # Different rooms get different mock chats so room-level rendering
+        # can be demoed offline. We salt the RNG with room_id when present.
+        seed_key = f"{match_id}::{room_id}" if room_id else match_id
+        rng = _seeded_random(seed_key)
         teams = self.context_hint.get(match_id) or _team_names_from_match_id(match_id)
 
         n_messages = max(
@@ -135,6 +143,7 @@ class MockChatFetcher:
 
         return {
             "match_id": match_id,
+            "room_id": room_id,
             "window_start": window_start.isoformat(),
             "window_end": anchor.isoformat(),
             "total_messages": len(messages),
@@ -144,5 +153,9 @@ class MockChatFetcher:
 
 # Convenience: a module-level callable so callers can pass it directly
 # to ChatAgent without instantiating the class explicitly.
-def fetch_mock_chat_window(match_id: str, window_minutes: int = 30) -> Dict[str, Any]:
-    return MockChatFetcher().fetch(match_id, window_minutes)
+def fetch_mock_chat_window(
+    match_id: str,
+    window_minutes: int = 30,
+    room_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return MockChatFetcher().fetch(match_id, window_minutes, room_id=room_id)

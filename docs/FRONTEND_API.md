@@ -195,7 +195,8 @@ Content-Type: application/json
   "match_id": "WC2026-A1",           // optional, for context
   "match_context": "...",            // optional, prebuilt prompt
   "user_name": "张三",               // optional, used in greeting
-  "recent_messages": [               // optional, last few chat turns
+  "room_id": "room_abc123",          // optional, chat room identifier
+  "recent_messages": [               // optional, last few chat turns IN THIS ROOM
     { "user_name": "李四", "text": "巴西稳了" }
   ]
 }

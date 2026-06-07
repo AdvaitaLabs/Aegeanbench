@@ -21,22 +21,36 @@ Plus optionally:
 
 ### Endpoint A (V1, required for launch): chat window
 
-AegeanBench polls this endpoint when a match prediction is being built.
+AegeanBench polls this endpoint when a match prediction is being built
+OR when an `@-mention` Q&A needs recent room context.
 
 ```http
-GET <chat-service>/api/v1/chat/window?match_id=<id>&minutes=<N>
+GET <chat-service>/api/v1/chat/window?match_id=<id>&minutes=<N>&room_id=<rid>
 ```
 
 | Parameter | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `match_id` | string | yes | - | e.g. `WC2026-A1` |
 | `minutes` | int | no | 30 | window length looking backwards from now |
+| `room_id` | string | no | (all rooms) | when set, return messages from this room only |
+
+**Important about rooms**: users create their own chat rooms via your
+service. Many rooms can be open for the same match in parallel.
+
+- When `room_id` is provided, return ONLY that room's messages.
+- When `room_id` is omitted, return the aggregate across all rooms for
+  the match (used by the "global pulse" view; optional - return empty
+  array if you don't support aggregation).
+
+The response shape always includes `room_id` (echoing the request, or
+`null` for the aggregate view) so clients can verify what they got.
 
 Response (200 OK):
 
 ```json
 {
   "match_id": "WC2026-A1",
+  "room_id": "room_abc123",
   "window_start": "2026-06-12T17:30:00Z",
   "window_end": "2026-06-12T18:00:00Z",
   "total_messages": 142,
@@ -100,6 +114,7 @@ Content-Type: application/json
 {
   "question": "巴西今晚进几个？",
   "match_id": "WC2026-A1",
+  "room_id": "room_abc123",
   "user_name": "ZhangSan",
   "recent_messages": [
     {"user_name": "LiSi", "text": "巴西稳了"},
@@ -107,6 +122,10 @@ Content-Type: application/json
   ]
 }
 ```
+
+`room_id` and `recent_messages` should both reference the SAME room.
+The recent_messages array is the chat service's responsibility to
+populate from its own message store; AegeanBench keeps no per-room state.
 
 Recognised agent IDs:
 

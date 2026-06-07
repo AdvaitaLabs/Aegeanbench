@@ -40,6 +40,7 @@ try:
         match_id: Optional[str] = None
         match_context: Optional[str] = None
         user_name: Optional[str] = None
+        room_id: Optional[str] = None
         recent_messages: Optional[List[Dict[str, Any]]] = None
 
     class PublishRequest(BaseModel):
@@ -244,6 +245,7 @@ def create_app(
             match_context=body.match_context,
             recent_messages=body.recent_messages,
             user_name=body.user_name,
+            room_id=body.room_id,
         )
         return response.to_dict()
 
