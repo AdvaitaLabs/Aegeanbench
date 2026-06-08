@@ -47,6 +47,25 @@ OUTPUT FORMAT (strict JSON):
 """
 
 
+def _fmt_xg_line(xg: dict) -> str:
+    """Render an xG profile defensively (missing fields shown as ?)."""
+    def _num(key: str, suffix: str = "", pct: bool = False) -> str:
+        val = xg.get(key)
+        if val is None:
+            return "?"
+        try:
+            v = float(val)
+            return f"{v*100:.0f}%" if pct else f"{v:{suffix}}"
+        except (ValueError, TypeError):
+            return "?"
+    return (
+        f"xG_for {_num('xg_for', '.2f')}, "
+        f"xG_against {_num('xg_against', '.2f')}, "
+        f"possession {_num('possession', pct=True)}, "
+        f"PPDA {_num('ppda', '.1f')}"
+    )
+
+
 def _format_recent_form(history) -> str:
     """Render a team's last N matches as 'W-L-D vs OPP (score)' lines."""
     if not history:
@@ -94,6 +113,21 @@ def _format_lineup(players, max_n: int = 5) -> str:
             f"{p.goals_for_team} intl goals){injury}{susp}"
         )
     return "\n".join(rows)
+
+
+def _format_weather(w: dict) -> str:
+    """One-liner weather summary safe against missing fields."""
+    return (
+        f"  - {w.get('city', '?')}: "
+        f"{w.get('conditions', 'Clear')}, "
+        f"{w.get('temperature_c', '?')}°C, "
+        f"humidity {w.get('humidity_pct', '?')}%, "
+        f"wind {w.get('wind_kph', '?')} kph"
+        + (
+            f", precip {w['precipitation_mm_h']} mm/h"
+            if w.get('precipitation_mm_h', 0) > 0 else ""
+        )
+    )
 
 
 def _format_odds(match: Match) -> str:
@@ -160,20 +194,8 @@ def build_user_prompt(ctx: MatchContext, focus: Optional[str] = None) -> str:
     parts.append("")
 
     parts.append("## Advanced Stats (last ~10 internationals)")
-    parts.append(
-        f"- {home.fifa_code}: "
-        f"xG_for {home_xg.get('xg_for', '?'):.2f}, "
-        f"xG_against {home_xg.get('xg_against', '?'):.2f}, "
-        f"possession {home_xg.get('possession', '?'):.0%}, "
-        f"PPDA {home_xg.get('ppda', '?'):.1f}"
-    )
-    parts.append(
-        f"- {away.fifa_code}: "
-        f"xG_for {away_xg.get('xg_for', '?'):.2f}, "
-        f"xG_against {away_xg.get('xg_against', '?'):.2f}, "
-        f"possession {away_xg.get('possession', '?'):.0%}, "
-        f"PPDA {away_xg.get('ppda', '?'):.1f}"
-    )
+    parts.append(f"- {home.fifa_code}: {_fmt_xg_line(home_xg)}")
+    parts.append(f"- {away.fifa_code}: {_fmt_xg_line(away_xg)}")
     parts.append("")
 
     parts.append(f"## {home.name} Recent Form")
@@ -197,6 +219,11 @@ def build_user_prompt(ctx: MatchContext, focus: Optional[str] = None) -> str:
     parts.append("## Market Odds (from bookmakers)")
     parts.append(_format_odds(m))
     parts.append("")
+
+    if getattr(ctx, "weather", None):
+        parts.append("## Weather at Kickoff")
+        parts.append(_format_weather(ctx.weather))
+        parts.append("")
 
     if focus:
         parts.append("## ANALYTICAL FOCUS")

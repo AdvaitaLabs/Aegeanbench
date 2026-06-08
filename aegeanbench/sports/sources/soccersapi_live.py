@@ -145,10 +145,14 @@ class SoccersAPILiveClient:
         mock: Optional[bool] = None,
         timeout: float = 6.0,
     ):
-        self.user = user or os.getenv("AEGEANBENCH_SOCCERSAPI_USER")
-        self.token = token or os.getenv("AEGEANBENCH_SOCCERSAPI_KEY")
+        # SoccersAPI auth: ?user=<USER>&token=<TOKEN>. Some packages allow
+        # token-only authentication; we keep both fields optional so the
+        # adapter still works if only the token is configured.
+        self.user = user or os.getenv("AEGEANBENCH_SOCCERSAPI_USER", "")
+        self.token = token or os.getenv("AEGEANBENCH_SOCCERSAPI_KEY", "")
         if mock is None:
-            mock = not (self.user and self.token)
+            # Only the token is strictly required - if we have it we go live.
+            mock = not self.token
         self.mock = mock
         self.timeout = timeout
         # Track last-seen event_id per match so we can de-duplicate

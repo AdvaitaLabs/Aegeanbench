@@ -346,6 +346,101 @@ def build_match_detail_endpoint(
 # ----------------------------- runner card -----------------------------
 
 
+def _classify_matches_by_time(
+    runs_list: List[Dict[str, Any]],
+    now_iso: Optional[str] = None,
+    live_window_hours: int = 3,
+    upcoming_window_hours: int = 24,
+    recent_window_hours: int = 24,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Pull match-level info from persisted runs and bucket them into
+    live / upcoming / recent for the dashboard.
+
+    A match is identified by match_id within predictions. We use the
+    most recent run that mentions each match_id as the source of truth.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = (
+        datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        if now_iso else datetime.now(timezone.utc)
+    )
+    live_lo = now - timedelta(hours=live_window_hours)
+    upcoming_hi = now + timedelta(hours=upcoming_window_hours)
+    recent_lo = now - timedelta(hours=recent_window_hours)
+
+    # Aggregate: for each match_id, hold the latest prediction from "aegean"
+    # plus the manifest's created_at so we can window them.
+    match_index: Dict[str, Dict[str, Any]] = {}
+
+    for run in sorted(
+        runs_list,
+        key=lambda r: r.get("manifest", {}).get("created_at", ""),
+        reverse=True,
+    ):
+        manifest = run.get("manifest", {})
+        run_id = manifest.get("run_id")
+        for runner_id, preds in (run.get("predictions") or {}).items():
+            for p in preds:
+                mid = p.get("match_id")
+                if not mid or mid in match_index:
+                    continue
+                match_index[mid] = {
+                    "match_id": mid,
+                    "run_id": run_id,
+                    "aegean_prediction": None,
+                    "predictions_by_runner": {},
+                    "kickoff_at": p.get("metadata", {}).get("kickoff_at"),
+                }
+            # Track per-runner prediction once match is known
+            for p in preds:
+                mid = p.get("match_id")
+                if mid in match_index:
+                    if runner_id not in match_index[mid]["predictions_by_runner"]:
+                        match_index[mid]["predictions_by_runner"][runner_id] = {
+                            "p_home_win": p.get("p_home_win"),
+                            "p_draw": p.get("p_draw"),
+                            "p_away_win": p.get("p_away_win"),
+                            "confidence": p.get("confidence"),
+                        }
+                    if runner_id == "aegean":
+                        match_index[mid]["aegean_prediction"] = {
+                            "p_home_win": p.get("p_home_win"),
+                            "p_draw": p.get("p_draw"),
+                            "p_away_win": p.get("p_away_win"),
+                            "confidence": p.get("confidence"),
+                            "rationale": p.get("rationale"),
+                        }
+
+    live: List[Dict[str, Any]] = []
+    upcoming: List[Dict[str, Any]] = []
+    recent: List[Dict[str, Any]] = []
+
+    for mid, entry in match_index.items():
+        kickoff_str = entry.get("kickoff_at")
+        if not kickoff_str:
+            # Fall back to run creation time when match metadata missing
+            kickoff_str = entry.get("created_at")
+        if not kickoff_str:
+            continue
+        try:
+            kickoff = datetime.fromisoformat(str(kickoff_str).replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=timezone.utc)
+
+        if live_lo <= kickoff <= now:
+            live.append(entry)
+        elif now < kickoff <= upcoming_hi:
+            upcoming.append(entry)
+        elif recent_lo <= kickoff < live_lo:
+            recent.append(entry)
+
+    return {"live": live, "upcoming": upcoming, "recent": recent}
+
+
 def build_dashboard_endpoint(
     runs: Iterable[Dict[str, Any]],
     tournament_id: str = "fifa-world-cup-2026",
@@ -419,12 +514,18 @@ def build_dashboard_endpoint(
         top_runner_id = leaderboard["rows"][0]["runner_id"]
         top_card = build_runner_card_endpoint(runs_list, top_runner_id)
 
+    # Sports-product home page additions
+    match_buckets = _classify_matches_by_time(runs_list)
+
     return {
         "_meta": {
             "endpoint": "GET /api/v1/dashboard",
-            "description": "Single-call home-page payload (leaderboard + recent + stats)",
+            "description": "Single-call home-page payload (sports product view)",
         },
         "tournament_id": tournament_id,
+        "live_matches": match_buckets["live"],
+        "upcoming_matches": match_buckets["upcoming"],
+        "recent_results": match_buckets["recent"],
         "leaderboard": leaderboard,
         "recent_runs": recent,
         "top_runner_card": top_card,

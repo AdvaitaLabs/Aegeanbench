@@ -46,15 +46,83 @@ try:
     class PublishRequest(BaseModel):
         channel: str = "predictions"
         payload: Dict[str, Any] = {}
+
+    class ChatSignalRequest(BaseModel):
+        """
+        JSON body for POST /api/v1/chat/signal.
+
+        Sent by the chat service when activity in a room crosses a threshold
+        that may warrant a fresh consensus run (e.g. a flurry of messages
+        right after a goal, or a sudden sentiment shift).
+        """
+        match_id: str
+        room_id: Optional[str] = None
+        message_count: int = 0
+        window_seconds: int = 300
+        strong_sentiment: bool = False
+        sentiment_label: Optional[str] = None
+
+    class ChatMessageInput(BaseModel):
+        """One chat message from the user-managed chat room."""
+        user_name: str = "anon"
+        text: str = ""
+        timestamp: Optional[str] = None
+        language: Optional[str] = None
+
+    class MatchDataInput(BaseModel):
+        """Optional rich match context the frontend can include."""
+        home_team: Optional[str] = None
+        away_team: Optional[str] = None
+        kickoff_at: Optional[str] = None
+        venue: Optional[str] = None
+        odds: Optional[Dict[str, float]] = None
+
+    class PredictRequest(BaseModel):
+        """
+        JSON body for POST /api/v1/predict.
+
+        Frontend builds a 'table' (chat room) and picks which agents to
+        include. chat_specialist is always added automatically by the
+        server; the frontend's agent_ids list does not need to mention it.
+        """
+        match_id: str
+        agent_ids: List[str] = []
+        match_data: Optional[MatchDataInput] = None
+        chat_messages: Optional[List[ChatMessageInput]] = None
+        table_id: Optional[str] = None
+        user_id: Optional[str] = None
+
+    class DivinationRequest(BaseModel):
+        """
+        JSON body for POST /api/v1/divination.
+
+        User points at the tarot or 周易 widget in the UI, picks their own
+        cards or hexagram, and we return a reading. card_indices is used
+        for tarot, hexagram_index for iching - the other field can be
+        omitted depending on type.
+        """
+        type: str   # "tarot" or "iching"
+        match_id: str
+        home_team: Optional[str] = "Home"
+        away_team: Optional[str] = "Away"
+        table_id: Optional[str] = None
+        card_indices: Optional[List[int]] = None        # tarot
+        hexagram_index: Optional[int] = None             # iching
 except ImportError:
     AgentAnswerRequest = None  # type: ignore[assignment]
     PublishRequest = None  # type: ignore[assignment]
+    ChatSignalRequest = None  # type: ignore[assignment]
+    ChatMessageInput = None  # type: ignore[assignment]
+    MatchDataInput = None  # type: ignore[assignment]
+    PredictRequest = None  # type: ignore[assignment]
+    DivinationRequest = None  # type: ignore[assignment]
 
 from aegeanbench.sports.orchestrator.persistence import (
     DEFAULT_RUNS_DIR,
     list_runs,
     load_run,
 )
+from aegeanbench.sports.reporter.agent_registry import build_agents_endpoint
 from aegeanbench.sports.reporter.endpoints import (
     RUNNER_REGISTRY,
     build_dashboard_endpoint,
@@ -117,9 +185,12 @@ def create_app(
     # In-process pub/sub for WebSocket fan-out. Keeps per-connection
     # subscriptions only - no persistent storage of user data.
     from aegeanbench.sports.reporter.realtime import LiveHub
+    from aegeanbench.sports.live.scheduler import MatchEventScheduler
     live_hub = LiveHub()
+    scheduler = MatchEventScheduler()
     app.state.live_hub = live_hub
     app.state.qa_handler = qa_handler
+    app.state.scheduler = scheduler
 
     def _all_runs():
         runs = []
@@ -174,6 +245,118 @@ def create_app(
         if runner_id not in RUNNER_REGISTRY:
             raise HTTPException(status_code=404, detail=f"unknown runner {runner_id}")
         return build_runner_card_endpoint(_all_runs(), runner_id)
+
+    # ---------- sports agent metadata (public) ----------
+
+    @app.get("/api/v1/agents")
+    def get_agents():
+        """The sports agents users can pick into a chat room."""
+        return build_agents_endpoint()
+
+    # ---------- one-shot consensus prediction ----------
+
+    @app.post("/api/v1/predict")
+    async def post_predict(body: PredictRequest):
+        """
+        Run a consensus prediction for one match with a caller-specified
+        agent panel + caller-supplied chat history. Stateless: the server
+        does not remember the table between calls.
+
+        Behaviour:
+            - default_agent_ids (currently just chat_specialist) are
+              merged into the panel automatically
+            - Unknown agent_ids are dropped (logged as warning)
+            - chat_messages are forwarded into the ChatAgent's prompt
+            - Returns the full prediction + discussion trace
+        """
+        from aegeanbench.sports.reporter.agent_registry import (
+            SPORTS_AGENTS_PUBLIC,
+            get_default_agent_ids,
+        )
+        valid_ids = {a["id"] for a in SPORTS_AGENTS_PUBLIC}
+        requested = [aid for aid in (body.agent_ids or []) if aid in valid_ids]
+        for must_have in get_default_agent_ids():
+            if must_have not in requested:
+                requested.append(must_have)
+        if not requested:
+            raise HTTPException(
+                status_code=400,
+                detail="at least one valid agent_id is required",
+            )
+
+        # Compose a synthetic MatchContext for the AegeanPredictor
+        from aegeanbench.sports.predictors.aegean import AegeanPredictor
+        from aegeanbench.sports.gateway import MatchContext
+        from aegeanbench.sports.models import (
+            CompetitionStage, Match, Team,
+        )
+        from datetime import datetime as _dt
+
+        md = body.match_data or MatchDataInput()
+        kickoff = (
+            _dt.fromisoformat(md.kickoff_at.replace("Z", "+00:00"))
+            if md.kickoff_at else _dt.now()
+        )
+        match = Match(
+            match_id=body.match_id,
+            competition="FIFA World Cup 2026",
+            stage=CompetitionStage.GROUP,
+            kickoff_at=kickoff,
+            home_team=Team(
+                fifa_code=(md.home_team or "BRA")[:3].upper(),
+                name=md.home_team or "Home",
+            ),
+            away_team=Team(
+                fifa_code=(md.away_team or "ARG")[:3].upper(),
+                name=md.away_team or "Away",
+            ),
+            venue=md.venue,
+        )
+        ctx = MatchContext(
+            match=match,
+            home_history=[],
+            away_history=[],
+            h2h=[],
+            home_xg_profile={},
+            away_xg_profile={},
+        )
+
+        # Inject chat messages into the agent_types for the predictor
+        predictor = AegeanPredictor(agent_types=requested)
+
+        # Forward chat history into the chat_specialist via metadata.
+        # For sprint we simply concatenate messages onto the match's
+        # market_snapshot (the ChatAgent in mock mode will see them via
+        # the unified prompt). A future iteration plumbs them through a
+        # dedicated parameter.
+        if body.chat_messages:
+            chat_summary = "\n".join(
+                f"  - {m.user_name}: {m.text}"
+                for m in body.chat_messages[-30:]
+            )
+            match.h2h_last5 = [{"chat_excerpt": chat_summary}]
+
+        prediction = predictor.predict(ctx)
+
+        return {
+            "_meta": {
+                "endpoint": "POST /api/v1/predict",
+                "description": "One-shot consensus prediction for a user-defined table",
+            },
+            "table_id": body.table_id,
+            "match_id": body.match_id,
+            "agents_used": requested,
+            "prediction": {
+                "p_home_win": prediction.p_home_win,
+                "p_draw": prediction.p_draw,
+                "p_away_win": prediction.p_away_win,
+                "confidence": prediction.confidence,
+                "rationale": prediction.rationale,
+                "latency_ms": prediction.latency_ms,
+                "tokens_used": prediction.tokens_used,
+            },
+            "discussion": (prediction.metadata or {}).get("discussion"),
+        }
 
     # ---------- bundle endpoints (reduce frontend chattiness) ----------
 
@@ -300,6 +483,86 @@ def create_app(
     async def publish_test(body: PublishRequest):
         n = await live_hub.publish(body.channel, body.payload)
         return {"published_to": n}
+
+    # ---------- user-initiated divination ----------
+
+    @app.get("/api/v1/divination/tarot/deck")
+    def get_tarot_deck():
+        """The full 78-card tarot deck. Frontend renders this as the picker UI."""
+        from aegeanbench.sports.divination import get_tarot_catalog
+        return get_tarot_catalog()
+
+    @app.get("/api/v1/divination/iching/hexagrams")
+    def get_iching_hexagrams():
+        """All 64 I Ching hexagrams. Frontend renders this as the picker UI."""
+        from aegeanbench.sports.divination import get_iching_catalog
+        return get_iching_catalog()
+
+    @app.post("/api/v1/divination")
+    async def post_divination(body: DivinationRequest):
+        """
+        User-initiated tarot or 周易 reading. User picks the cards /
+        hexagram on the frontend; we just interpret. Returns a reading
+        plus an optional outcome lean (not the same as the consensus
+        prediction).
+        """
+        from aegeanbench.sports.divination import perform_divination
+        if body.type not in ("tarot", "iching"):
+            raise HTTPException(
+                status_code=400,
+                detail="type must be 'tarot' or 'iching'",
+            )
+        try:
+            result = perform_divination(
+                div_type=body.type,
+                match_id=body.match_id,
+                home_team=body.home_team or "Home",
+                away_team=body.away_team or "Away",
+                table_id=body.table_id,
+                card_indices=body.card_indices,
+                hexagram_index=body.hexagram_index,
+                llm_call=None,    # use template fallback for now;
+                                  # wire to OpenAI later if needed
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return result.to_dict()
+
+    # ---------- chat signal (chat-service notifying us of room activity) ----------
+
+    @app.post("/api/v1/chat/signal")
+    async def post_chat_signal(body: ChatSignalRequest):
+        """
+        Chat service tells us a room has crossed an activity threshold.
+
+        We forward the signal to MatchEventScheduler which decides whether
+        to trigger a fresh consensus run. The actual consensus invocation
+        happens in a background worker - here we just record the trigger
+        and emit a WebSocket event so any dashboards can react.
+
+        Returns a flag indicating whether we accepted the signal as a
+        consensus trigger (subject to throttling), so the chat service
+        can stop pinging us when we're already busy.
+        """
+        trigger = app.state.scheduler.on_chat_heat(
+            match_id=body.match_id,
+            message_count_in_window=body.message_count,
+            strong_sentiment=body.strong_sentiment,
+        )
+        if trigger:
+            payload = {
+                "type": "chat_signal_accepted",
+                "match_id": body.match_id,
+                "room_id": body.room_id,
+                "trigger": trigger.to_dict(),
+            }
+            await live_hub.publish(f"match:{body.match_id}", payload)
+        return {
+            "accepted": trigger is not None,
+            "trigger": trigger.to_dict() if trigger else None,
+            "match_id": body.match_id,
+            "room_id": body.room_id,
+        }
 
     return app
 

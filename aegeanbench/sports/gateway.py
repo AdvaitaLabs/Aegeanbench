@@ -21,6 +21,10 @@ from aegeanbench.sports.sources import (
     KaggleHistoryLoader,
     SoccersAPIAdapter,
 )
+from aegeanbench.sports.sources.openweather import (
+    HOST_CITIES,
+    OpenWeatherAdapter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,9 @@ class MatchContext:
     h2h: List[Match]
     home_xg_profile: Dict[str, float]
     away_xg_profile: Dict[str, float]
+    # Optional pre-match weather snapshot from OpenWeatherMap. None when
+    # no API key is configured or the venue isn't known.
+    weather: Optional[Dict[str, Any]] = None
 
     def summary(self) -> str:
         """Compact one-line summary for logs."""
@@ -72,6 +79,7 @@ class SportsDataGateway:
         self.soccersapi = SoccersAPIAdapter(mock_by_default=mock)
         self.fbref = FBrefAdapter(mock_by_default=mock)
         self.history_loader = KaggleHistoryLoader(mock_by_default=mock)
+        self.weather = OpenWeatherAdapter(mock=mock)
 
     # -------- top-level API --------
 
@@ -124,6 +132,10 @@ class SportsDataGateway:
         home_xg = self.fbref.fetch_xg_profile(match.home_team.fifa_code)
         away_xg = self.fbref.fetch_xg_profile(match.away_team.fifa_code)
 
+        # Weather (optional). Look up the host city from venue text; fall
+        # back to None when the venue doesn't match our known WC city list.
+        weather = self._fetch_weather_for_match(match)
+
         ctx = MatchContext(
             match=match,
             home_history=home_history,
@@ -131,9 +143,27 @@ class SportsDataGateway:
             h2h=h2h,
             home_xg_profile=home_xg,
             away_xg_profile=away_xg,
+            weather=weather,
         )
 
         return ctx
+
+    def _fetch_weather_for_match(self, match: Match) -> Optional[Dict[str, Any]]:
+        """
+        Resolve venue text to a known city, then call OpenWeather.
+        Returns None when the venue doesn't include a recognised city.
+        """
+        venue = (match.venue or "").lower()
+        if not venue:
+            return None
+        for city in HOST_CITIES.keys():
+            if city.lower() in venue:
+                try:
+                    return self.weather.fetch_for_match(city, match.kickoff_at)
+                except Exception as e:
+                    logger.warning("weather fetch failed for %s: %s", city, e)
+                    return None
+        return None
 
     def load_training_history(self, num_matches: int = 500) -> List[Match]:
         """For Dixon-Coles / Elo training: pull many historical matches."""
