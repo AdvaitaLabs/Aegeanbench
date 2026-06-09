@@ -1,5 +1,3 @@
-version: "3.9"
-
 # World Cup 2026 stack: postgres + aegean-consensus + AegeanBench reporter.
 #
 # Layout assumes aegean-consensus checkout is at ../aegean-consensus
