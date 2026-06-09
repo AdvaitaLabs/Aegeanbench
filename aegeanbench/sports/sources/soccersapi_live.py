@@ -164,11 +164,28 @@ class SoccersAPILiveClient:
         self,
         tournament: str = "world-cup",
     ) -> List[LiveMatchState]:
-        """Return current state of every live match in the tournament."""
+        """
+        Return current state of every live match in the tournament.
+
+        Best-effort: when SoccersAPI returns an "endpoint not in your plan"
+        message, or the World Cup league_id filter is unsupported, we
+        return an empty list rather than raising so the rest of the
+        pipeline keeps running with football-data as primary source.
+        """
         if self.mock:
             return self._mock_live_matches()
         try:
-            return self._real_live_matches(tournament)
+            matches = self._real_live_matches(tournament)
+            # Plan-coverage check: a non-empty meta.msg means the call
+            # technically succeeded but the data was clipped. We still
+            # return whatever rows are present (often 0).
+            if not matches:
+                logger.info(
+                    "soccersapi /livescores returned 0 matches for tournament=%s "
+                    "(likely plan coverage; falling back to other sources)",
+                    tournament,
+                )
+            return matches
         except Exception as e:
             logger.warning("soccersapi live fetch failed (%s); returning empty", e)
             return []
@@ -204,36 +221,56 @@ class SoccersAPILiveClient:
         return {"user": self.user or "", "token": self.token or ""}
 
     def _real_live_matches(self, tournament: str) -> List[LiveMatchState]:
+        """
+        Pull currently-live matches. Verified endpoint:
+            GET /v2.2/livescores/?t=live   (or t=inplay)
+        """
         import requests
 
         params = self._auth_params()
-        params["t"] = "livescores"
-        # SoccersAPI lets you filter by league_id; the World Cup package
-        # has a fixed numeric ID we pass through.
+        params["t"] = "live"
         if tournament == "world-cup":
-            params["league_id"] = os.getenv("SOCCERSAPI_WORLD_CUP_LEAGUE_ID", "")
+            league_id = os.getenv("SOCCERSAPI_WORLD_CUP_LEAGUE_ID", "377")
+            if league_id:
+                params["league_id"] = league_id
         url = f"{SOCCERSAPI_BASE}/livescores/"
         resp = requests.get(url, params=params, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
-        rows = data.get("data") or data.get("livescores") or []
+        rows = data.get("data") or []
+        if not isinstance(rows, list):
+            rows = [rows]
         return [self._parse_match_row(r) for r in rows if r]
 
     def _real_events(self, match_id: str) -> List[LiveEvent]:
+        """
+        Pull all in-match events for one fixture. Verified endpoint:
+            GET /v2.2/fixtures/?t=match_events&id=<fixture_id>
+
+        Returns events including: goals, shots, cards, substitutions,
+        period markers. We map the rich type vocabulary down to our
+        LiveEventKind enum where possible.
+        """
         import requests
 
         params = self._auth_params()
-        params["t"] = "matches"
+        params["t"] = "match_events"
         params["id"] = match_id
-        url = f"{SOCCERSAPI_BASE}/matches/"
+        url = f"{SOCCERSAPI_BASE}/fixtures/"
         resp = requests.get(url, params=params, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
-        body = data.get("data") or {}
-        if isinstance(body, list) and body:
-            body = body[0]
-        events_raw = body.get("events") or []
-        return [self._parse_event_row(match_id, r) for r in events_raw if r]
+        rows = data.get("data") or []
+        if not isinstance(rows, list):
+            rows = [rows]
+        parsed: List[LiveEvent] = []
+        for r in rows:
+            if not r:
+                continue
+            ev = self._parse_event_row(match_id, r)
+            if ev is not None:
+                parsed.append(ev)
+        return parsed
 
     @staticmethod
     def _parse_match_row(row: Dict[str, Any]) -> LiveMatchState:
@@ -251,28 +288,58 @@ class SoccersAPILiveClient:
         )
 
     @staticmethod
-    def _parse_event_row(match_id: str, row: Dict[str, Any]) -> LiveEvent:
+    def _parse_event_row(match_id: str, row: Dict[str, Any]) -> Optional["LiveEvent"]:
+        """
+        Map SoccersAPI's verbose event type vocabulary down to our enum.
+
+        Real types seen in the API include: goal, own_goal, penalty,
+        yellow_card, red_card, substitution, shot_on_target,
+        shot_off_target, corner, foul, offside, ... We only surface
+        the events that meaningfully affect the score / consensus.
+        Anything else returns None so the caller can skip it.
+        """
         kind_map = {
             "goal": LiveEventKind.GOAL,
             "own_goal": LiveEventKind.OWN_GOAL,
             "penalty": LiveEventKind.PENALTY,
+            "penalty_goal": LiveEventKind.GOAL,
+            "penalty_missed": LiveEventKind.PENALTY,
+            "yellow_card": LiveEventKind.YELLOW_CARD,
             "yellowcard": LiveEventKind.YELLOW_CARD,
+            "red_card": LiveEventKind.RED_CARD,
             "redcard": LiveEventKind.RED_CARD,
+            "yellowred_card": LiveEventKind.RED_CARD,
             "substitution": LiveEventKind.SUBSTITUTION,
             "ht": LiveEventKind.HALF_TIME,
             "ft": LiveEventKind.FULL_TIME,
             "ko": LiveEventKind.KICK_OFF,
+            "kick_off": LiveEventKind.KICK_OFF,
         }
         raw_kind = str(row.get("type") or row.get("event") or "").lower().replace("-", "_").replace(" ", "_")
-        kind = kind_map.get(raw_kind, LiveEventKind.GOAL)
+        kind = kind_map.get(raw_kind)
+        if kind is None:
+            # shot_on_target / shot_off_target / corner / foul etc.
+            # - high-resolution stats we currently don't act on
+            return None
+        # SoccersAPI events don't have a stable event_id; synthesise one
+        # from match_id + minute + raw_kind so de-dup still works.
+        event_id = str(
+            row.get("id")
+            or row.get("event_id")
+            or f"{match_id}-{row.get('minute', 0)}-{raw_kind}"
+        )
+        try:
+            minute = int(row.get("minute") or 0)
+        except (TypeError, ValueError):
+            minute = 0
         return LiveEvent(
             match_id=match_id,
-            event_id=str(row.get("id") or row.get("event_id") or ""),
+            event_id=event_id,
             kind=kind,
-            minute=int(row.get("minute") or 0),
-            team_fifa_code=row.get("team_code") or row.get("team_short") or None,
-            player_name=row.get("player") or row.get("player_name") or None,
-            detail=str(row.get("info") or row.get("detail") or ""),
+            minute=minute,
+            team_fifa_code=row.get("team_code") or row.get("team_short") or str(row.get("team_id") or "") or None,
+            player_name=row.get("player_name") or row.get("player") or None,
+            detail=str(row.get("info") or row.get("reason") or row.get("detail") or ""),
         )
 
     @staticmethod

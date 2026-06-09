@@ -124,10 +124,110 @@ class SoccersAPIAdapter(SourceAdapter):
     has_odds = True
     has_lineups = True
 
-    def __init__(self, api_key: Optional[str] = None, mock_by_default: Optional[bool] = None):
+    # SoccersAPI auth pattern: ?user=USER&token=TOKEN
+    # The `user` is the account username (from the SoccersAPI dashboard).
+    # We accept either constructor injection or env-var configuration.
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        user: Optional[str] = None,
+        mock_by_default: Optional[bool] = None,
+    ):
         key = api_key or os.getenv("AEGEANBENCH_SOCCERSAPI_KEY")
+        self.user = user or os.getenv("AEGEANBENCH_SOCCERSAPI_USER", "")
         default_mock = mock_by_default if mock_by_default is not None else (key is None)
         super().__init__(api_key=key, mock_by_default=default_mock)
+
+    def _real_fetch_odds(self, match_id: str, policy: FetchPolicy) -> List[Odds]:
+        """
+        Pull pre-match odds from SoccersAPI.
+
+        Endpoint:
+            GET /v2.2/fixtures/?t=match_odds&id=<fixture_id>
+
+        Response shape (verified 2026-06-09 against live API):
+            { "data": [
+                {
+                  "id": 1,
+                  "name": "1X2, Full Time Result",
+                  "bookmakers": [
+                    { "id": 2, "name": "Bet365",
+                      "odds": { "data": { "home": "1.500", "draw": "4.000",
+                                          "away": "5.500", ... } } },
+                    ...
+                  ]
+                },
+                { "id": 3, "name": "Asian Handicap", ... },
+                { "id": 2, "name": "Over/Under, Goal Line", ... }
+              ] }
+
+        We only consume the 1X2 (Full Time Result) market for our betting
+        layer. Asian Handicap and Over/Under are ignored in V1.
+        """
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/fixtures/",
+                params={
+                    "user": self.user,
+                    "token": self.api_key,
+                    "t": "match_odds",
+                    "id": match_id,
+                },
+                timeout=policy.timeout_seconds,
+            )
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            logger.warning("soccersapi match_odds fetch failed for %s: %s", match_id, e)
+            return []
+
+        markets = payload.get("data") or []
+        if not isinstance(markets, list):
+            markets = [markets]
+
+        # Find the 1X2 / Full Time Result market
+        ftr = None
+        for market in markets:
+            name = (market.get("name") or "").lower()
+            if "1x2" in name or "full time" in name or "match winner" in name:
+                ftr = market
+                break
+        if ftr is None:
+            logger.debug("soccersapi: no 1X2 market for fixture %s", match_id)
+            return []
+
+        out: List[Odds] = []
+        for bk in ftr.get("bookmakers", []):
+            bk_name = bk.get("name") or f"bookmaker_{bk.get('id')}"
+            data = ((bk.get("odds") or {}).get("data")) or {}
+            try:
+                home = float(data.get("home") or 0)
+                draw = float(data.get("draw") or 0)
+                away = float(data.get("away") or 0)
+            except (TypeError, ValueError):
+                continue
+            if home <= 1.0 or draw <= 1.0 or away <= 1.0:
+                continue
+            out.append(
+                Odds(
+                    bookmaker=bk_name,
+                    timestamp=datetime.now(),
+                    home_win=home,
+                    draw=draw,
+                    away_win=away,
+                )
+            )
+        return out
+
+    def _real_fetch_lineup(self, match_id: str, team_fifa_code: str, policy: FetchPolicy) -> List[Player]:
+        logger.info("soccersapi real lineup not yet wired; using mock for now")
+        return _mock_lineup(team_fifa_code)
+
+    def _real_fetch_h2h(self, home_fifa: str, away_fifa: str, last_n: int, policy: FetchPolicy) -> List[Match]:
+        logger.info("soccersapi real h2h not yet wired; using mock")
+        return _mock_h2h(home_fifa, away_fifa, last_n)
 
     def fetch_odds(self, match_id: str, policy: Optional[FetchPolicy] = None) -> List[Odds]:
         policy = self._resolve_policy(policy)
@@ -157,20 +257,4 @@ class SoccersAPIAdapter(SourceAdapter):
             return _mock_h2h(home_fifa, away_fifa, last_n)
         return self._real_fetch_h2h(home_fifa, away_fifa, last_n, policy)
 
-    # ---------- real API stubs ----------
-
-    def _real_fetch_odds(self, match_id: str, policy: FetchPolicy) -> List[Odds]:
-        logger.warning("soccersapi real fetch_odds not yet implemented; mock fallback")
-        return _mock_odds()
-
-    def _real_fetch_lineup(
-        self, match_id: str, team_fifa_code: str, policy: FetchPolicy
-    ) -> List[Player]:
-        logger.warning("soccersapi real fetch_lineup not yet implemented; mock fallback")
-        return _mock_lineup(team_fifa_code)
-
-    def _real_fetch_h2h(
-        self, home_fifa: str, away_fifa: str, last_n: int, policy: FetchPolicy
-    ) -> List[Match]:
-        logger.warning("soccersapi real fetch_h2h not yet implemented; mock fallback")
-        return _mock_h2h(home_fifa, away_fifa, last_n)
+    # (legacy stubs removed - see live implementations above)

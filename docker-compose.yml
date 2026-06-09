@@ -1,17 +1,35 @@
 version: "3.9"
 
-# World Cup 2026 stack: aegean-consensus (port 8000, internal) +
-# AegeanBench reporter (port 8200, public). The reporter calls
-# consensus over the internal docker network.
-#
-# Usage:
-#   cp docs/.env.example .env
-#   docker-compose up -d
+# World Cup 2026 stack: postgres + aegean-consensus + AegeanBench reporter.
 #
 # Layout assumes aegean-consensus checkout is at ../aegean-consensus
-# (sibling directory). Adjust the build.context if yours is elsewhere.
+# (sibling directory). Each service reads its OWN .env file:
+#   ../aegean-consensus/.env  -> LLM keys, agent models, postgres URL
+#   ./.env                    -> sports data keys, internal URLs
+#
+# Usage:
+#   docker compose up -d --build
+#
+# Public ingress: only port 8200 (AegeanBench reporter).
+# aegean-consensus runs on port 8000 INTERNAL to the docker network.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aegean-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aegean
+      POSTGRES_DB: aegean
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegean_secret}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegean -d aegean"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   aegean-consensus:
     build:
       context: ../aegean-consensus
@@ -19,16 +37,11 @@ services:
     image: aegean-consensus:worldcup-2026
     container_name: aegean-consensus
     restart: unless-stopped
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
-      AEGEAN_AGENT_COUNT: "7"
-      AEGEAN_QUORUM_SIZE: "2"
-      AEGEAN_STABILITY_HORIZON: "2"
-      AEGEAN_MAX_ROUNDS: "5"
+    env_file:
+      - ../aegean-consensus/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
     expose:
       - "8000"
     healthcheck:
@@ -36,7 +49,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 60s
 
   aegeanbench:
     build:
@@ -45,28 +58,14 @@ services:
     image: aegeanbench:worldcup-2026
     container_name: aegeanbench
     restart: unless-stopped
+    env_file:
+      - ./.env
     depends_on:
       aegean-consensus:
         condition: service_healthy
     environment:
-      # AegeanBench -> aegean-consensus over the internal network
+      # Override the internal URL even if .env points elsewhere
       AEGEAN_CONSENSUS_URL: http://aegean-consensus:8000
-
-      # LLM keys (predictors fall back to mock when absent)
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
-
-      # Data sources (each falls back to mock when absent)
-      AEGEANBENCH_FOOTBALL_DATA_KEY: ${AEGEANBENCH_FOOTBALL_DATA_KEY}
-      AEGEANBENCH_SOCCERSAPI_KEY: ${AEGEANBENCH_SOCCERSAPI_KEY}
-      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
-      FBREF_LIVE: ${FBREF_LIVE:-0}
-
-      # Chat service (V2)
-      CHAT_SERVICE_URL: ${CHAT_SERVICE_URL:-http://chat-service:9100}
-
-      # Misc
       PYTHONPATH: /app
     ports:
       - "8200:8200"
