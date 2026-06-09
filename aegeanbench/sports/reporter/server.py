@@ -569,7 +569,12 @@ def create_app(
 
 # Module-level app for `uvicorn aegeanbench.sports.reporter.server:app`
 try:
-    app = create_app()
+    # Build a default LocalQAHandler so @-mention works out of the box.
+    # The handler reads OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+    # from the environment and falls back to a deterministic reply when
+    # no key is configured.
+    from aegeanbench.sports.reporter.local_qa import LocalQAHandler
+    app = create_app(qa_handler=LocalQAHandler())
 except RuntimeError as e:
     # FastAPI not installed; module is still importable
     app = None  # type: ignore[assignment]

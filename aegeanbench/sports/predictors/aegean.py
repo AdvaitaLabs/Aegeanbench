@@ -120,21 +120,35 @@ class AegeanPredictor(Predictor):
         start = time.perf_counter()
         group_id = None
         try:
-            # Step 1: create group
+            # Step 1: create group.
+            # aegean-consensus' CreateGroupRequest schema requires
+            # group_name + created_by; we used to send {"name": ...} and
+            # got 422. The consensus-side AgentRegistry only knows
+            # generic agent_0..agent_N IDs, so we map each requested
+            # sports specialist to one of those slots and pass the
+            # specialist name through the `role` field for telemetry.
             r = requests.post(
                 f"{self.base_url}/api/v1/groups",
-                json={"name": f"wc-pred-{ctx.match.match_id}"},
+                json={
+                    "group_name": f"wc-pred-{ctx.match.match_id}",
+                    "created_by": "aegeanbench",
+                    "mode": "consensus",
+                },
                 timeout=self.timeout,
             )
             r.raise_for_status()
             group_id = r.json()["group_id"]
 
-            # Step 2: add members with weights
-            for agent_type in self.agent_types:
+            # Step 2: add members. Map sports role -> generic agent_id.
+            for i, agent_type in enumerate(self.agent_types):
                 weight = self.agent_weights.get(agent_type, 1.0)
                 requests.post(
                     f"{self.base_url}/api/v1/groups/{group_id}/members",
-                    json={"agent_type": agent_type, "capability_weight": weight},
+                    json={
+                        "agent_id": f"agent_{i}",
+                        "role": agent_type,
+                        "capability_weight": weight,
+                    },
                     timeout=self.timeout,
                 ).raise_for_status()
 

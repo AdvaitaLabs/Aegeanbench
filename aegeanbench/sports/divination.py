@@ -342,7 +342,12 @@ def perform_divination(
     timestamp = datetime.now(timezone.utc).isoformat()
 
     if div_type == "tarot":
-        picks = _normalise_indices(card_indices or [], deck_size=len(TAROT_DECK), k=3)
+        if card_indices:
+            picks = _normalise_indices(card_indices, deck_size=len(TAROT_DECK), k=3)
+        else:
+            # Agent auto-draws 3 unique cards on the user's behalf.
+            import random as _random
+            picks = _random.sample(range(len(TAROT_DECK)), 3)
         drawn = [
             {**TAROT_DECK[idx], "position": _TAROT_POSITIONS[i]}
             for i, idx in enumerate(picks)
@@ -357,7 +362,11 @@ def perform_divination(
             timestamp=timestamp,
         )
     elif div_type == "iching":
-        idx = (hexagram_index or 0) % len(HEXAGRAMS)
+        if hexagram_index is None:
+            import random as _random
+            idx = _random.randint(0, len(HEXAGRAMS) - 1)
+        else:
+            idx = hexagram_index % len(HEXAGRAMS)
         hexagram = dict(HEXAGRAMS[idx])
         prompt = _render_iching_prompt(home_team, away_team, hexagram)
         result = DivinationResult(
