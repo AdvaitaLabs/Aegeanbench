@@ -80,7 +80,7 @@ class AegeanPredictor(Predictor):
         agent_weights: Optional[Dict[str, float]] = None,
         mock: Optional[bool] = None,
         quorum_threshold: float = 0.6,
-        max_rounds: int = 3,
+        max_rounds: int = 4,
         timeout: float = 60.0,
     ):
         self.base_url = (
