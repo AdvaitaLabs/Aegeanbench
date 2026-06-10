@@ -395,7 +395,7 @@ def perform_divination(
     tokens = 0
 
     if llm_call is None:
-        reading_text = _fallback_reading(result)
+        reading_text = _fallback_reading(result, lang=lang)
     else:
         try:
             raw = llm_call(
@@ -403,13 +403,13 @@ def perform_divination(
                 prompt,
             )
             parsed = _parse_llm_json(raw)
-            reading_text = str(parsed.get("reading") or "").strip() or _fallback_reading(result)
+            reading_text = str(parsed.get("reading") or "").strip() or _fallback_reading(result, lang=lang)
             p_home = float(parsed.get("p_home_win", p_home))
             p_draw = float(parsed.get("p_draw", p_draw))
             p_away = float(parsed.get("p_away_win", p_away))
         except Exception as e:
             logger.warning("divination LLM call failed: %s", e)
-            reading_text = _fallback_reading(result)
+            reading_text = _fallback_reading(result, lang=lang)
 
     # Normalise the lean
     total = p_home + p_draw + p_away
@@ -436,13 +436,24 @@ def perform_divination(
     return result
 
 
-def _fallback_reading(result: DivinationResult) -> str:
-    """Deterministic English template reading used when no LLM is configured."""
+def _fallback_reading(result: DivinationResult, lang: str = "en") -> str:
+    """Deterministic template reading used when no LLM is configured."""
     if result.type == "tarot":
         cards = result.drawn_cards
         if not cards:
-            return "No cards drawn; please pick three cards and try again."
+            return (
+                "未抽到任何牌，请重新抽三张再试。"
+                if lang == "zh"
+                else "No cards drawn; please pick three cards and try again."
+            )
         names = ", ".join(card["name"] for card in cards)
+        if lang == "zh":
+            return (
+                f"抽到的牌：{names}。整体来看，比赛在 "
+                f"「{cards[0]['keyword']}」 的氛围下开场，当前节奏由 "
+                f"「{cards[1]['keyword']}」 主导，终局走向 "
+                f"「{cards[2]['keyword']}」。保持冷静，谨慎下注。"
+            )
         return (
             f"You drew: {names}. Read together, the match opens under "
             f"the sign of {cards[0]['keyword']}, the current moment is "
@@ -451,10 +462,16 @@ def _fallback_reading(result: DivinationResult) -> str:
             f"with care."
         )
     if result.type == "iching" and result.hexagram:
+        if lang == "zh":
+            return (
+                f"你起得 {result.hexagram['name']} 卦"
+                f"（{result.hexagram['id']}）：{result.hexagram['keyword']}。"
+                f"此卦提示比赛的节奏与气势，宜观望再决断。"
+            )
         return (
             f"You have cast hexagram {result.hexagram['name']} "
             f"({result.hexagram['id']}): {result.hexagram['keyword']}. "
             f"This sign hints at the rhythm and momentum of the match; "
             f"observe before committing."
         )
-    return "Divination could not be completed. Please try again."
+    return "占卜未能完成，请重试。" if lang == "zh" else "Divination could not be completed. Please try again."
