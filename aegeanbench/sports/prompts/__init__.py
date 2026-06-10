@@ -207,6 +207,25 @@ def build_user_prompt(ctx: MatchContext, focus: Optional[str] = None) -> str:
     parts.append(_format_h2h(ctx.h2h))
     parts.append("")
 
+    agg = getattr(ctx, "h2h_aggregate", None)
+    if agg and agg.get("num_matches", 0) > 0:
+        h = agg.get("home") or {}
+        a = agg.get("away") or {}
+        parts.append("## Head-to-Head (all-time aggregate)")
+        parts.append(
+            f"- Total meetings: {agg.get('num_matches', 0)} "
+            f"({agg.get('total_goals', 0)} total goals)"
+        )
+        parts.append(
+            f"- {h.get('name', home.fifa_code)}: "
+            f"{h.get('wins', 0)}W {h.get('draws', 0)}D {h.get('losses', 0)}L"
+        )
+        parts.append(
+            f"- {a.get('name', away.fifa_code)}: "
+            f"{a.get('wins', 0)}W {a.get('draws', 0)}D {a.get('losses', 0)}L"
+        )
+        parts.append("")
+
     parts.append(f"## {home.name} Key Players")
     parts.append(_format_lineup(m.home_lineup))
     parts.append("")

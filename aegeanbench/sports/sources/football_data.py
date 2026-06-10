@@ -390,6 +390,80 @@ class FootballDataAdapter(SourceAdapter):
             return _mock_squad_for(team_name_or_code)
         return out
 
+    # ---------- match-id resolution ----------
+
+    _match_id_index: Dict[tuple, int] = {}
+    _match_id_loaded: bool = False
+
+    def _build_wc_match_index(self, policy: FetchPolicy) -> Dict[tuple, int]:
+        """
+        Pull every World Cup match (104 of them) once and build keys:
+            (HOME_TLA, AWAY_TLA)          -> fd_match_id
+            (HOME_TLA, AWAY_TLA, YYYY-MM-DD) -> fd_match_id   (knockout dups)
+            (HOME_NAME_UPPER, AWAY_NAME_UPPER) -> fd_match_id
+        Lets callers ask by either FIFA code, full name, or include the
+        date to disambiguate group-vs-knockout rematches.
+        """
+        if self._match_id_loaded:
+            return self._match_id_index
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/competitions/WC/matches",
+                headers=self._headers(),
+                timeout=policy.timeout_seconds,
+            )
+            r.raise_for_status()
+            data = r.json() or {}
+        except Exception as e:
+            logger.warning("football_data WC match index fetch failed: %s", e)
+            self._match_id_loaded = True
+            return self._match_id_index
+
+        for m in data.get("matches", []):
+            mid = m.get("id")
+            if not mid:
+                continue
+            home = m.get("homeTeam") or {}
+            away = m.get("awayTeam") or {}
+            home_tla = (home.get("tla") or "").upper()
+            away_tla = (away.get("tla") or "").upper()
+            home_name = (home.get("name") or "").upper()
+            away_name = (away.get("name") or "").upper()
+            date_iso = (m.get("utcDate") or "")[:10]
+            if home_tla and away_tla:
+                self._match_id_index[(home_tla, away_tla)] = int(mid)
+                self._match_id_index[(home_tla, away_tla, date_iso)] = int(mid)
+            if home_name and away_name:
+                self._match_id_index[(home_name, away_name)] = int(mid)
+        self._match_id_loaded = True
+        logger.info("football_data WC match index built: %d entries", len(self._match_id_index))
+        return self._match_id_index
+
+    def resolve_match_id(
+        self,
+        home: str,
+        away: str,
+        date_iso: Optional[str] = None,
+        policy: Optional[FetchPolicy] = None,
+    ) -> Optional[int]:
+        """
+        Look up the football-data match id from team names / FIFA codes.
+        Pass a date_iso ("2026-06-11") when knockout rematches make the
+        (home, away) pair ambiguous.
+        """
+        policy = self._resolve_policy(policy)
+        if policy.mock:
+            return None
+        idx = self._build_wc_match_index(policy)
+        h = (home or "").upper()
+        a = (away or "").upper()
+        if date_iso:
+            hit = idx.get((h, a, date_iso))
+            if hit:
+                return hit
+        return idx.get((h, a))
+
     def fetch_h2h_aggregate(
         self,
         fd_match_id: int,

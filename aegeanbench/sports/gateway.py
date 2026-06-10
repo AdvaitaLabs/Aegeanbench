@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class MatchContext:
+class MatchContext:  # noqa: D101
     """
     Everything a predictor needs to predict one match.
 
@@ -51,6 +51,12 @@ class MatchContext:
     # Carried on the context (not on Match.h2h_last5 - that would
     # corrupt real head-to-head data).
     chat_summary: Optional[str] = None
+    # Optional aggregate H2H stats from football-data (all-time
+    # encounters between the two sides). Shape:
+    #   {"num_matches": 1, "total_goals": 2,
+    #    "home": {"wins": 0, "draws": 1, "losses": 0, ...},
+    #    "away": {"wins": 0, "draws": 1, "losses": 0, ...}}
+    h2h_aggregate: Optional[Dict[str, Any]] = None
 
     def summary(self) -> str:
         """Compact one-line summary for logs."""
@@ -112,16 +118,20 @@ class SportsDataGateway:
             # rebuild from scratch for now. v2: add deserialization.
             logger.debug("gateway cache hit for %s but rebuilding (deser TBD)", match.match_id)
 
-        # Enrich match with odds + lineups
+        # Enrich match with odds + real squads via football-data.
         if not match.odds:
             match.odds = self.soccersapi.fetch_odds(match.match_id)
+
+        # Real 26-man squads from football-data (replaces soccersapi
+        # mock lineup which only returns "Player 1..11" placeholders).
         if not match.home_lineup:
-            match.home_lineup = self.soccersapi.fetch_lineup(match.match_id, match.home_team.fifa_code)
+            match.home_lineup = self.football_data.fetch_squad(match.home_team.name or match.home_team.fifa_code)
         if not match.away_lineup:
-            match.away_lineup = self.soccersapi.fetch_lineup(match.match_id, match.away_team.fifa_code)
+            match.away_lineup = self.football_data.fetch_squad(match.away_team.name or match.away_team.fifa_code)
+
+        # H2H from football-data's free aggregate endpoint. soccersapi's
+        # h2h needs a paid plan; on the Soccer Odds plan we just hit mock.
         if not match.h2h_last5:
-            # Pass match_id so soccersapi can use t=match_h2h&id=... — without
-            # it we fall back to mock h2h.
             h2h = self.soccersapi.fetch_h2h(
                 match.home_team.fifa_code,
                 match.away_team.fifa_code,
@@ -147,6 +157,21 @@ class SportsDataGateway:
         # back to None when the venue doesn't match our known WC city list.
         weather = self._fetch_weather_for_match(match)
 
+        # Real H2H aggregate from football-data (free tier returns this
+        # even when the detailed list is gated). Best-effort, never raises.
+        h2h_aggregate = None
+        try:
+            kickoff_iso = match.kickoff_at.date().isoformat() if match.kickoff_at else None
+            fd_match_id = self.football_data.resolve_match_id(
+                match.home_team.name or match.home_team.fifa_code,
+                match.away_team.name or match.away_team.fifa_code,
+                date_iso=kickoff_iso,
+            )
+            if fd_match_id:
+                h2h_aggregate = self.football_data.fetch_h2h_aggregate(fd_match_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("h2h aggregate fetch failed: %s", exc)
+
         ctx = MatchContext(
             match=match,
             home_history=home_history,
@@ -155,6 +180,7 @@ class SportsDataGateway:
             home_xg_profile=home_xg,
             away_xg_profile=away_xg,
             weather=weather,
+            h2h_aggregate=h2h_aggregate,
         )
 
         return ctx

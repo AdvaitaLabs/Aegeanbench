@@ -191,13 +191,58 @@ def _brief_player(
     )
 
 
-def _brief_h2h(home_fifa: str, away_fifa: str, gw) -> str:
+def _brief_h2h(
+    home_fifa: str,
+    away_fifa: str,
+    gw,
+    home_team_name: Optional[str] = None,
+    away_team_name: Optional[str] = None,
+    kickoff_date_iso: Optional[str] = None,
+) -> str:
+    """
+    Try football-data's free aggregate H2H first (real summary stats),
+    fall back to soccersapi's detailed list (which on a "Soccer Odds"
+    plan returns mock anyway). football-data covers Mexico vs South
+    Africa historical aggregate as: numberOfMatches, totalGoals, and
+    each side's wins/draws/losses across all encounters.
+    """
+    # 1. Real aggregate from football-data
+    try:
+        fd_match_id = gw.football_data.resolve_match_id(
+            home_team_name or home_fifa,
+            away_team_name or away_fifa,
+            date_iso=kickoff_date_iso,
+        )
+    except Exception as e:
+        logger.debug("fd resolve_match_id failed: %s", e)
+        fd_match_id = None
+
+    if fd_match_id:
+        try:
+            agg = gw.football_data.fetch_h2h_aggregate(fd_match_id)
+        except Exception as e:
+            logger.warning("fd h2h aggregate failed: %s", e)
+            agg = None
+        if agg and agg.get("num_matches", 0) > 0:
+            h = agg.get("home") or {}
+            a = agg.get("away") or {}
+            lines = [
+                f"Head-to-head (all-time aggregate, {agg.get('num_matches', 0)} meetings, "
+                f"{agg.get('total_goals', 0)} total goals):",
+                f"  {h.get('name', home_fifa)}: {h.get('wins', 0)}W "
+                f"{h.get('draws', 0)}D {h.get('losses', 0)}L",
+                f"  {a.get('name', away_fifa)}: {a.get('wins', 0)}W "
+                f"{a.get('draws', 0)}D {a.get('losses', 0)}L",
+            ]
+            return "\n".join(lines)
+
+    # 2. Fallback to soccersapi (returns mock under the Soccer Odds plan)
     try:
         h2h = gw.soccersapi.fetch_h2h(home_fifa, away_fifa, last_n=5)
     except Exception as e:
         logger.warning("h2h fetch failed: %s", e)
         return "Head-to-head: (unavailable)"
-    return "Head-to-head (last 5):\n" + _format_h2h(h2h)
+    return "Head-to-head (recent, may be approximate):\n" + _format_h2h(h2h)
 
 
 def _brief_weather(match_data: Dict[str, Any], gw) -> str:
@@ -314,7 +359,13 @@ def build_brief_for_role(
     if "odds" in needs:
         sections.append(_brief_market(match_id, gw))
     if "h2h" in needs:
-        sections.append(_brief_h2h(home_fifa, away_fifa, gw))
+        # kickoff_at lets us disambiguate knockout rematches
+        kickoff_iso = (md.get("kickoff_at") or "")[:10] or None
+        sections.append(_brief_h2h(
+            home_fifa, away_fifa, gw,
+            home_team_name=home_team, away_team_name=away_team,
+            kickoff_date_iso=kickoff_iso,
+        ))
     if "lineup" in needs:
         sections.append(_brief_player(
             match_id, home_fifa, away_fifa, gw,
