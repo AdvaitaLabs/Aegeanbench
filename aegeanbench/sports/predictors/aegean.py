@@ -166,10 +166,40 @@ class AegeanPredictor(Predictor):
             r.raise_for_status()
             result = r.json()
 
-            # Step 4: parse final answer
-            final = result.get("final_solution", {})
-            answer_text = final.get("answer", "")
+            # Step 4: parse final answer. consensus can return
+            # final_solution=null when success=False (e.g. when the
+            # MatchOutcomeNormalizer hasn't bucketed enough weight onto
+            # a single outcome). Recover by averaging probabilities
+            # across the final round's agent answers — they're all real
+            # LLM output, just didn't reach quorum.
+            final = result.get("final_solution") or {}
+            answer_text = final.get("answer", "") if isinstance(final, dict) else ""
             parsed = _extract_json(answer_text)
+            if not parsed or all(parsed.get(k, 0) == 0 for k in ("p_home_win", "p_draw", "p_away_win")):
+                # Salvage from the discussion: average probs across last round
+                rounds = result.get("discussion_rounds") or []
+                if rounds:
+                    last = rounds[-1]
+                    agent_solutions = last.get("agent_responses") or {}
+                    accum = {"p_home_win": 0.0, "p_draw": 0.0, "p_away_win": 0.0}
+                    n = 0
+                    for s in agent_solutions.values():
+                        sub = _extract_json((s or {}).get("answer", "") or "")
+                        if not sub:
+                            continue
+                        accum["p_home_win"] += float(sub.get("p_home_win", 0) or 0)
+                        accum["p_draw"] += float(sub.get("p_draw", 0) or 0)
+                        accum["p_away_win"] += float(sub.get("p_away_win", 0) or 0)
+                        n += 1
+                    if n:
+                        parsed = {
+                            "p_home_win": accum["p_home_win"] / n,
+                            "p_draw": accum["p_draw"] / n,
+                            "p_away_win": accum["p_away_win"] / n,
+                            "confidence": 0.5,
+                            "rationale": "Salvaged from final-round agents (consensus did not reach quorum).",
+                        }
+
             p_home, p_draw, p_away = _normalize_probs(
                 float(parsed.get("p_home_win", 0)),
                 float(parsed.get("p_draw", 0)),
