@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from aegeanbench.sports.models import (
     CompetitionStage,
@@ -23,8 +23,27 @@ from aegeanbench.sports.models import (
     MatchOutcome,
     MatchResult,
     Odds,
+    Player,
     Team,
 )
+
+
+def _mock_squad_for(team_name_or_code: str) -> List[Player]:
+    """Tiny mock so callers never get an empty list during outages."""
+    code = (team_name_or_code or "???")[:3].upper()
+    out: List[Player] = []
+    for i in range(11):
+        pos = "GK" if i == 0 else ("DF" if i <= 4 else ("MF" if i <= 8 else "FW"))
+        out.append(Player(
+            player_id=f"{code}-mock-{i}",
+            name=f"{code} Player {i+1}",
+            team_fifa_code=code,
+            position=pos,
+            age=28,
+            matches_played_for_team=10,
+            goals_for_team=0,
+        ))
+    return out
 from aegeanbench.sports.sources.base import FetchPolicy, SourceAdapter
 
 logger = logging.getLogger(__name__)
@@ -247,6 +266,164 @@ class FootballDataAdapter(SourceAdapter):
         """Free tier: /v4/teams/{id}/matches is restricted; degrade to mock."""
         logger.info("football_data team history requires paid tier; using mock for %s", fifa_code)
         return _mock_team_history(fifa_code, last_n)
+
+    # ---------- WC team-id cache + squad ----------
+
+    _wc_team_id_cache: Dict[str, int] = {}
+    _wc_team_id_loaded: bool = False
+
+    def _wc_teams_by_name(self, policy: FetchPolicy) -> Dict[str, int]:
+        """
+        Return a {team_name: football_data_team_id} map for the WC squad,
+        cached on the adapter instance. Used to translate the front-end's
+        team names ("Mexico", "South Africa") into football-data ids.
+        """
+        if self._wc_team_id_loaded:
+            return self._wc_team_id_cache
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/competitions/WC/teams",
+                headers=self._headers(),
+                timeout=policy.timeout_seconds,
+            )
+            r.raise_for_status()
+            data = r.json() or {}
+        except Exception as e:
+            logger.warning("football_data WC teams fetch failed: %s", e)
+            self._wc_team_id_loaded = True
+            return self._wc_team_id_cache
+        for t in data.get("teams", []):
+            tid = t.get("id")
+            if not tid:
+                continue
+            # Index by every plausible name + the FIFA code so callers
+            # can look up by whichever they have.
+            for key in (t.get("name"), t.get("shortName"), t.get("tla")):
+                if key:
+                    self._wc_team_id_cache[str(key).upper()] = int(tid)
+        self._wc_team_id_loaded = True
+        return self._wc_team_id_cache
+
+    def resolve_team_id(self, team_name_or_code: str, policy: Optional[FetchPolicy] = None) -> Optional[int]:
+        """Translate a team name or FIFA code into football-data team_id."""
+        if not team_name_or_code:
+            return None
+        policy = self._resolve_policy(policy)
+        if policy.mock:
+            return None
+        mapping = self._wc_teams_by_name(policy)
+        return mapping.get(team_name_or_code.upper())
+
+    def fetch_squad(
+        self,
+        team_name_or_code: str,
+        policy: Optional[FetchPolicy] = None,
+    ) -> List[Player]:
+        """
+        Real 26-man national-team squad with names, positions, DOB, shirt
+        number, and nationality. Falls back to mock if the lookup or the
+        API call fails so callers always get a usable list.
+        """
+        policy = self._resolve_policy(policy)
+        if policy.mock:
+            return _mock_squad_for(team_name_or_code)
+
+        team_id = self.resolve_team_id(team_name_or_code, policy)
+        if not team_id:
+            logger.info("football_data: no team_id for %s; mocking squad", team_name_or_code)
+            return _mock_squad_for(team_name_or_code)
+
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/teams/{team_id}",
+                headers=self._headers(),
+                timeout=policy.timeout_seconds,
+            )
+            r.raise_for_status()
+            payload = r.json() or {}
+        except Exception as e:
+            logger.warning("football_data squad fetch for %s failed: %s", team_id, e)
+            return _mock_squad_for(team_name_or_code)
+
+        squad = payload.get("squad") or []
+        tla = (payload.get("tla") or team_name_or_code[:3]).upper()
+        out: List[Player] = []
+        for p in squad:
+            pos_raw = (p.get("position") or "Midfielder").lower()
+            pos_short = {
+                "goalkeeper": "GK", "defender": "DF", "centre-back": "DF",
+                "left-back": "DF", "right-back": "DF",
+                "midfielder": "MF", "defensive midfield": "MF",
+                "central midfield": "MF", "attacking midfield": "MF",
+                "offence": "FW", "centre-forward": "FW",
+                "left winger": "FW", "right winger": "FW",
+            }.get(pos_raw, "MF")
+            age = None
+            dob = p.get("dateOfBirth")
+            if dob:
+                try:
+                    age = (datetime.utcnow() - datetime.fromisoformat(str(dob))).days // 365
+                except (ValueError, TypeError):
+                    age = None
+            out.append(
+                Player(
+                    player_id=str(p.get("id") or ""),
+                    name=p.get("name") or "Unknown",
+                    team_fifa_code=tla,
+                    position=pos_short,
+                    age=age,
+                    club=None,  # football-data doesn't expose current club in /teams
+                    matches_played_for_team=0,
+                    goals_for_team=0,
+                )
+            )
+        if not out:
+            return _mock_squad_for(team_name_or_code)
+        return out
+
+    def fetch_h2h_aggregate(
+        self,
+        fd_match_id: int,
+        policy: Optional[FetchPolicy] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return aggregate H2H stats for a football-data match id:
+            {
+              "num_matches": int,
+              "total_goals": int,
+              "home": {"id":..,"name":..,"wins":..,"draws":..,"losses":..},
+              "away": {...}
+            }
+        Returns None when the API call fails. The /head2head detail list
+        is gated behind TIER_TWO so we only surface aggregates.
+        """
+        policy = self._resolve_policy(policy)
+        if policy.mock:
+            return None
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/matches/{fd_match_id}/head2head",
+                headers=self._headers(),
+                timeout=policy.timeout_seconds,
+                params={"limit": 10},
+            )
+            r.raise_for_status()
+            payload = r.json() or {}
+        except Exception as e:
+            logger.warning("football_data h2h fetch for %s failed: %s", fd_match_id, e)
+            return None
+        agg = payload.get("aggregates") or {}
+        if not agg:
+            return None
+        return {
+            "num_matches": agg.get("numberOfMatches", 0),
+            "total_goals": agg.get("totalGoals", 0),
+            "home": agg.get("homeTeam") or {},
+            "away": agg.get("awayTeam") or {},
+        }
 
     @staticmethod
     def _parse_fixtures(rows: list, competition: str) -> List[Match]:

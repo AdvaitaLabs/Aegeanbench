@@ -135,16 +135,45 @@ def _brief_market(match_id: str, gw) -> str:
     return "Pre-match 1X2 odds (top books):\n" + _format_odds(odds)
 
 
-def _brief_player(match_id: str, home_fifa: str, away_fifa: str, gw) -> str:
+def _brief_player(
+    match_id: str,
+    home_fifa: str,
+    away_fifa: str,
+    gw,
+    home_team_name: Optional[str] = None,
+    away_team_name: Optional[str] = None,
+) -> str:
+    """
+    Pull the 26-man squad from football-data first (real player names,
+    DOB, position). Fall back to soccersapi's lineup endpoint when
+    football-data is unavailable. Pre-match lineups proper require the
+    paid tier on both providers, so squad is the most realistic real-
+    data we can show before kickoff.
+    """
+    home: list = []
+    away: list = []
+    # Football-data wants the full team name ("Mexico"), not the FIFA code
+    home_query = home_team_name or home_fifa
+    away_query = away_team_name or away_fifa
     try:
-        home = gw.soccersapi.fetch_lineup(match_id, home_fifa)
-        away = gw.soccersapi.fetch_lineup(match_id, away_fifa)
+        home = gw.football_data.fetch_squad(home_query)
     except Exception as e:
-        logger.warning("lineup fetch failed for %s: %s", match_id, e)
-        return "Lineups: (unavailable)"
+        logger.warning("football_data squad fetch (%s) failed: %s", home_query, e)
+    try:
+        away = gw.football_data.fetch_squad(away_query)
+    except Exception as e:
+        logger.warning("football_data squad fetch (%s) failed: %s", away_query, e)
+    if not home or not away:
+        # Fall back to soccersapi lineup stub so we never return empty
+        try:
+            home = home or gw.soccersapi.fetch_lineup(match_id, home_fifa)
+            away = away or gw.soccersapi.fetch_lineup(match_id, away_fifa)
+        except Exception as e:
+            logger.warning("lineup fetch failed for %s: %s", match_id, e)
+            return "Lineups: (unavailable)"
     return (
-        f"Home XI ({home_fifa}):\n" + _format_lineup(home) +
-        f"\n\nAway XI ({away_fifa}):\n" + _format_lineup(away)
+        f"Home squad ({home_fifa}, {len(home)} players):\n" + _format_lineup(home) +
+        f"\n\nAway squad ({away_fifa}, {len(away)} players):\n" + _format_lineup(away)
     )
 
 
@@ -273,7 +302,10 @@ def build_brief_for_role(
     if "h2h" in needs:
         sections.append(_brief_h2h(home_fifa, away_fifa, gw))
     if "lineup" in needs:
-        sections.append(_brief_player(match_id, home_fifa, away_fifa, gw))
+        sections.append(_brief_player(
+            match_id, home_fifa, away_fifa, gw,
+            home_team_name=home_team, away_team_name=away_team,
+        ))
     if "weather" in needs:
         wx = _brief_weather(md, gw)
         if wx:
