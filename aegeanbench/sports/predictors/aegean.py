@@ -177,12 +177,29 @@ class AegeanPredictor(Predictor):
             )
             latency_ms = int((time.perf_counter() - start) * 1000)
 
-            # Capture the full multi-round discussion for the front-end
+            # Capture the full multi-round discussion for the front-end.
+            # Build the agent_N -> sports_role map from the order we
+            # registered members in step 2, so the trace shows
+            # "stats_specialist" instead of the generic "agent_2".
+            role_map = {
+                f"agent_{i}": role for i, role in enumerate(self.agent_types)
+            }
             from aegeanbench.sports.discussion import parse_aegean_response_to_trace
             discussion = parse_aegean_response_to_trace(
                 match_id=ctx.match.match_id,
                 runner_id=self.runner_id,
                 consensus_response=result,
+                role_map=role_map,
+            )
+
+            # aegean-consensus reports tokens via tokens_prompt /
+            # tokens_completion (or a usage.tokens_total roll-up); the
+            # legacy `tokens_used` field never existed in the response.
+            usage = result.get("usage") or {}
+            tokens_total = (
+                int(usage.get("tokens_total", 0))
+                or int(result.get("tokens_prompt", 0))
+                   + int(result.get("tokens_completion", 0))
             )
 
             return Prediction(
@@ -194,11 +211,13 @@ class AegeanPredictor(Predictor):
                 confidence=float(parsed.get("confidence", final.get("confidence", 0.6))),
                 rationale=str(parsed.get("rationale", "")),
                 latency_ms=latency_ms,
-                tokens_used=int(result.get("tokens_used", 0)),
+                tokens_used=tokens_total,
                 metadata={
                     "model": "aegean",
                     "rounds_used": result.get("rounds_used", 0),
-                    "weighted_votes": result.get("weighted_votes", {}),
+                    "weighted_votes": discussion.raw_metadata.get(
+                        "weighted_votes", {}
+                    ),
                     "agent_types": self.agent_types,
                     "discussion": discussion.to_dict(),
                 },

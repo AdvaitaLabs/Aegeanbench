@@ -96,10 +96,35 @@ class DiscussionTrace:
         }
 
 
+def _normalize_vote_keys(votes: Dict[str, float]) -> Dict[str, float]:
+    """
+    aegean-consensus' DecisionEngine uses the raw answer string as the
+    vote-counter key. For our prediction tasks the raw answer is a JSON
+    blob, so the dict comes back like {"```json\\n{\\"p_home_win\\":...}": 3.0}.
+
+    Collapse such keys to the matching outcome label so the front-end
+    sees {"home_win": 3.0} like it expects. Non-JSON keys (e.g. when
+    consensus already normalised) pass through unchanged.
+    """
+    if not isinstance(votes, dict):
+        return {}
+    collapsed: Dict[str, float] = {}
+    for raw_key, weight in votes.items():
+        key = str(raw_key)
+        if "{" in key and "p_home_win" in key:
+            probs = _parse_probs(key)
+            label = _argmax(probs) if probs else key
+        else:
+            label = key
+        collapsed[label] = collapsed.get(label, 0.0) + float(weight or 0.0)
+    return collapsed
+
+
 def parse_aegean_response_to_trace(
     match_id: str,
     runner_id: str,
     consensus_response: Dict[str, Any],
+    role_map: Optional[Dict[str, str]] = None,
 ) -> DiscussionTrace:
     """
     Convert the GroupConsensusResult JSON returned by aegean-consensus
@@ -162,10 +187,18 @@ def parse_aegean_response_to_trace(
             probs = _parse_probs(sol.get("answer", "{}"))
             argmax = _argmax(probs)
             prev = prev_argmax_per_agent.get(agent_id)
+            # Resolve role: prefer explicit role from consensus payload,
+            # then the caller-provided agent_id->role map (e.g. agent_0
+            # -> stats_specialist), and finally fall back to agent_id.
+            resolved_role = (
+                sol.get("role")
+                or (role_map.get(agent_id) if role_map else None)
+                or agent_id
+            )
             agents_entries.append(
                 DiscussionAgentEntry(
                     agent_id=agent_id,
-                    role=sol.get("role", agent_id),
+                    role=resolved_role,
                     p_home_win=probs.get("home_win", 0.0),
                     p_draw=probs.get("draw", 0.0),
                     p_away_win=probs.get("away_win", 0.0),
@@ -197,7 +230,7 @@ def parse_aegean_response_to_trace(
                     or raw.get("quorum_reached")
                 ),
                 agents=agents_entries,
-                weighted_votes=raw.get("weighted_votes") or {},
+                weighted_votes=_normalize_vote_keys(raw.get("weighted_votes") or {}),
                 agreement_points=raw.get("agreement_points") or [],
                 disagreement_points=raw.get("disagreement_points") or [],
             )
@@ -212,7 +245,7 @@ def parse_aegean_response_to_trace(
         rounds=rounds,
         final_summary=str(final.get("reasoning", "")),
         raw_metadata={
-            "weighted_votes": consensus_response.get("weighted_votes") or {},
+            "weighted_votes": _normalize_vote_keys(consensus_response.get("weighted_votes") or {}),
             "consensus_path": consensus_response.get("consensus_path") or [],
             "consensus_reached": consensus_response.get("consensus_reached", False),
         },
