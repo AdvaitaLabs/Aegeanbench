@@ -351,15 +351,22 @@ class FootballDataAdapter(SourceAdapter):
         tla = (payload.get("tla") or team_name_or_code[:3]).upper()
         out: List[Player] = []
         for p in squad:
+            # football-data sends e.g. "Goalkeeper", "Centre-Back",
+            # "Defensive Midfield", "Offence", "Right Winger". Map by
+            # substring so we catch granular variants too.
             pos_raw = (p.get("position") or "Midfielder").lower()
-            pos_short = {
-                "goalkeeper": "GK", "defender": "DF", "centre-back": "DF",
-                "left-back": "DF", "right-back": "DF",
-                "midfielder": "MF", "defensive midfield": "MF",
-                "central midfield": "MF", "attacking midfield": "MF",
-                "offence": "FW", "centre-forward": "FW",
-                "left winger": "FW", "right winger": "FW",
-            }.get(pos_raw, "MF")
+            if "keeper" in pos_raw:
+                pos_short = "GK"
+            elif ("back" in pos_raw or "defen" in pos_raw):
+                pos_short = "DF"
+            elif ("midfield" in pos_raw):
+                pos_short = "MF"
+            elif ("offence" in pos_raw or "offense" in pos_raw
+                  or "forward" in pos_raw or "winger" in pos_raw
+                  or "striker" in pos_raw):
+                pos_short = "FW"
+            else:
+                pos_short = "MF"
             age = None
             dob = p.get("dateOfBirth")
             if dob:

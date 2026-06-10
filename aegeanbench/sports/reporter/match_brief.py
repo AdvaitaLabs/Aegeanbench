@@ -103,13 +103,27 @@ def _format_h2h(h2h_matches) -> str:
     return "\n".join(rows) if rows else "  (no completed h2h matches)"
 
 
-def _format_lineup(players, max_n: int = 8) -> str:
+def _format_lineup(players, per_position_cap: int = 3) -> str:
+    """
+    Render the squad balanced across positions so the model sees keepers,
+    defenders, midfielders, AND forwards. football-data returns the
+    squad sorted by position, so a naive head-N slice cuts off the
+    attackers entirely.
+    """
     if not players:
         return "  (lineup not posted yet)"
-    rows = []
-    for p in players[:max_n]:
-        rows.append(f"  {p.position:<3} {p.name}  (age {p.age}, {p.goals_for_team} g for nation)")
-    return "\n".join(rows)
+    by_pos: Dict[str, list] = {"GK": [], "DF": [], "MF": [], "FW": []}
+    for p in players:
+        bucket = by_pos.get(p.position, by_pos["MF"])
+        if len(bucket) < per_position_cap:
+            bucket.append(p)
+    ordered = by_pos["GK"] + by_pos["DF"] + by_pos["MF"] + by_pos["FW"]
+    rows = [
+        f"  {p.position:<3} {p.name}"
+        + (f"  (age {p.age})" if p.age else "")
+        for p in ordered
+    ]
+    return "\n".join(rows) if rows else "  (lineup not posted yet)"
 
 
 def _format_weather(w: Optional[Dict[str, Any]]) -> str:
