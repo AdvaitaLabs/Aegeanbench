@@ -82,6 +82,10 @@ try:
         kickoff_at: Optional[str] = None
         venue: Optional[str] = None
         odds: Optional[Dict[str, float]] = None
+        # Optional override for reply language: 'zh' or 'en'. When
+        # omitted, the server auto-detects from chat snippets / falls
+        # back to English.
+        lang: Optional[str] = None
 
     class PredictRequest(BaseModel):
         """
@@ -112,6 +116,8 @@ try:
         home_team: Optional[str] = "Home"
         away_team: Optional[str] = "Away"
         table_id: Optional[str] = None
+        # 'zh' or 'en'. Auto-detected from home_team / away_team when omitted.
+        lang: Optional[str] = None
         card_indices: Optional[List[int]] = None        # tarot
         hexagram_index: Optional[int] = None             # iching
 except ImportError:
@@ -365,8 +371,17 @@ def create_app(
                 for m in body.chat_messages[-30:]
             )
 
+        # Pick prediction language from the chat snippets if any,
+        # otherwise default to English. Front-end can override by
+        # passing match_data.lang explicitly.
+        from aegeanbench.sports.lang import detect_from_signals
+        explicit_lang = (body.match_data.model_dump().get("lang")
+                         if body.match_data else None)
+        chat_texts = [m.text for m in (body.chat_messages or [])]
+        lang = explicit_lang or detect_from_signals(None, chat_texts) or "en"
+
         predictor = AegeanPredictor(agent_types=requested)
-        prediction = predictor.predict(ctx)
+        prediction = predictor.predict(ctx, lang=lang)
 
         return {
             "_meta": {
@@ -471,6 +486,13 @@ def create_app(
                 logger.warning("brief build failed: %s", exc)
                 match_context = None
 
+        # Auto-pick reply language from the user's question (CJK -> zh,
+        # otherwise en). recent_messages serve as a weak secondary
+        # signal when the question itself is too short to disambiguate.
+        from aegeanbench.sports.lang import detect_from_signals
+        secondary = [m.get("text", "") for m in (body.recent_messages or [])]
+        lang = detect_from_signals(body.question, secondary)
+
         response = await app.state.qa_handler.answer(
             agent_id=agent_id,
             question=body.question,
@@ -478,6 +500,7 @@ def create_app(
             recent_messages=body.recent_messages,
             user_name=body.user_name,
             room_id=body.room_id,
+            lang=lang,
         )
         return response.to_dict()
 
@@ -561,6 +584,12 @@ def create_app(
                 status_code=400,
                 detail="type must be 'tarot' or 'iching'",
             )
+        # Decide reading language: caller can pin via body.lang, else
+        # infer from the team names that were sent in.
+        from aegeanbench.sports.lang import detect_from_signals
+        lang = body.lang or detect_from_signals(
+            body.home_team, [body.away_team or ""]
+        )
         try:
             result = perform_divination(
                 div_type=body.type,
@@ -572,6 +601,7 @@ def create_app(
                 hexagram_index=body.hexagram_index,
                 llm_call=None,    # use template fallback for now;
                                   # wire to OpenAI later if needed
+                lang=lang,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

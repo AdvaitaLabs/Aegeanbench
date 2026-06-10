@@ -255,10 +255,17 @@ def _normalise_indices(indices: List[int], deck_size: int, k: int) -> List[int]:
     return seen
 
 
+def _reading_lang_clause(lang: str) -> str:
+    if lang == "zh":
+        return "Write the reading in Simplified Chinese (简体中文), 3-4 sentences"
+    return "Write the reading in English, 3-4 sentences"
+
+
 def _render_tarot_prompt(
     home_team: str,
     away_team: str,
     drawn: List[Dict[str, str]],
+    lang: str = "en",
 ) -> str:
     lines = [
         f"You are a tarot reader at a football match: {home_team} vs {away_team}.",
@@ -270,11 +277,11 @@ def _render_tarot_prompt(
         )
     lines.extend([
         "",
-        "Write a mystical-but-grounded reading in 3-4 sentences in English.",
+        f"{_reading_lang_clause(lang)}, mystical-but-grounded.",
         "Then estimate a probability distribution over the three outcomes.",
         "Keep probabilities reasonable (do not output 0.99 or 0).",
         "",
-        "OUTPUT FORMAT (strict JSON):",
+        "OUTPUT FORMAT (strict JSON, keys in ASCII English):",
         '{ "reading": "...", "p_home_win": 0.45, "p_draw": 0.30, "p_away_win": 0.25 }',
     ])
     return "\n".join(lines)
@@ -284,15 +291,16 @@ def _render_iching_prompt(
     home_team: str,
     away_team: str,
     hexagram: Dict[str, str],
+    lang: str = "en",
 ) -> str:
     return (
         f"You are an I Ching reader at a football match: {home_team} vs {away_team}.\n"
         f"The user has cast hexagram {hexagram.get('id')} ({hexagram.get('name')}) "
         f"meaning: {hexagram.get('keyword')}.\n\n"
-        "Write a culturally-grounded but playful reading in 3-4 sentences "
-        "in English.\nThen estimate a probability distribution over the "
-        "three outcomes.\nKeep probabilities reasonable.\n\n"
-        "OUTPUT FORMAT (strict JSON):\n"
+        f"{_reading_lang_clause(lang)}, culturally-grounded but playful.\n"
+        "Then estimate a probability distribution over the three outcomes.\n"
+        "Keep probabilities reasonable.\n\n"
+        "OUTPUT FORMAT (strict JSON, keys in ASCII English):\n"
         '{ "reading": "...", "p_home_win": 0.45, "p_draw": 0.30, "p_away_win": 0.25 }'
     )
 
@@ -321,6 +329,7 @@ def perform_divination(
     card_indices: Optional[List[int]] = None,
     hexagram_index: Optional[int] = None,
     llm_call=None,
+    lang: str = "en",
 ) -> DivinationResult:
     """
     Produce one divination reading.
@@ -352,7 +361,7 @@ def perform_divination(
             {**TAROT_DECK[idx], "position": _TAROT_POSITIONS[i]}
             for i, idx in enumerate(picks)
         ]
-        prompt = _render_tarot_prompt(home_team, away_team, drawn)
+        prompt = _render_tarot_prompt(home_team, away_team, drawn, lang=lang)
         result = DivinationResult(
             type="tarot",
             match_id=match_id,
@@ -368,7 +377,7 @@ def perform_divination(
         else:
             idx = hexagram_index % len(HEXAGRAMS)
         hexagram = dict(HEXAGRAMS[idx])
-        prompt = _render_iching_prompt(home_team, away_team, hexagram)
+        prompt = _render_iching_prompt(home_team, away_team, hexagram, lang=lang)
         result = DivinationResult(
             type="iching",
             match_id=match_id,

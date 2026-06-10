@@ -100,8 +100,8 @@ class AegeanPredictor(Predictor):
 
     # ----------------------- predict -----------------------
 
-    def predict(self, ctx: MatchContext) -> Prediction:
-        prompts = build_full_prompt(ctx)
+    def predict(self, ctx: MatchContext, lang: str = "en") -> Prediction:
+        prompts = build_full_prompt(ctx, lang=lang)
         if self.mock:
             return self._mock_predict(ctx, prompts)
         try:

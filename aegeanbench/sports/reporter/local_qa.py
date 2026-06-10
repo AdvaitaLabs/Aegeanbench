@@ -41,13 +41,15 @@ class QAResponse:
         }
 
 
-def _build_system_prompt(agent: Dict[str, Any]) -> str:
+def _build_system_prompt(agent: Dict[str, Any], lang: str = "en") -> str:
+    from aegeanbench.sports.lang import lang_directive
     return (
         f"You are {agent['name']} ({agent['id']}), a specialist in a "
         f"World Cup 2026 prediction panel.\n"
         f"Role: {agent['description']}\n\n"
         f"Rules:\n"
-        f" - Answer in 2-4 sentences, English only.\n"
+        f" - {lang_directive(lang)}\n"
+        f" - Answer in 2-4 sentences.\n"
         f" - Stay strictly within your specialty. If the question is "
         f"outside your role, briefly redirect to the right specialist.\n"
         f" - Speak with conviction but acknowledge uncertainty where real.\n"
@@ -111,6 +113,7 @@ class LocalQAHandler:
         recent_messages: Optional[List[Dict[str, Any]]] = None,
         user_name: Optional[str] = None,
         room_id: Optional[str] = None,
+        lang: Optional[str] = None,
     ) -> QAResponse:
         agent = self._lookup_agent(agent_id)
         if agent is None:
@@ -120,7 +123,17 @@ class LocalQAHandler:
                 confidence=0.0, metadata={"error": "unknown_agent"},
             )
 
-        system = _build_system_prompt(agent)
+        # Auto-detect language from the question itself when the caller
+        # didn't pin it explicitly. Recent chat messages serve as a weak
+        # secondary signal.
+        if not lang:
+            from aegeanbench.sports.lang import detect_from_signals
+            secondary = [
+                m.get("text", "") for m in (recent_messages or [])
+            ]
+            lang = detect_from_signals(question, secondary)
+
+        system = _build_system_prompt(agent, lang=lang)
         user = _build_user_prompt(question, match_context, recent_messages, user_name)
 
         if not self.api_key:
@@ -176,6 +189,7 @@ class LocalQAHandler:
                 model=getattr(resp, "model", None) or self.model,
                 metadata={
                     "role": agent_id,
+                    "lang": lang,
                     "tokens": getattr(usage, "total_tokens", None) if usage else None,
                 },
             )

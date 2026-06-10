@@ -278,14 +278,27 @@ def _focus_hint(focus: str) -> str:
 
 
 def build_full_prompt(
-    ctx: MatchContext, focus: Optional[str] = None
+    ctx: MatchContext,
+    focus: Optional[str] = None,
+    lang: str = "en",
 ) -> Dict[str, str]:
     """
     Return both system and user prompts as a dict.
 
-    Convenience for callers that want a single object to pass downstream.
+    When `lang='zh'` the model is instructed to write its `rationale`
+    field in Simplified Chinese. The JSON schema and the probability
+    fields stay English so downstream parsing is unaffected.
     """
+    from aegeanbench.sports.lang import lang_directive
+    system = SYSTEM_PROMPT
+    if lang == "zh":
+        system = (
+            system + "\n\n"
+            "LANGUAGE: " + lang_directive("zh") + "\n"
+            "Specifically: write the `rationale` field in Simplified Chinese. "
+            "Keep all JSON keys, numeric values, and outcome labels in ASCII English."
+        )
     return {
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "user": build_user_prompt(ctx, focus=focus),
     }
