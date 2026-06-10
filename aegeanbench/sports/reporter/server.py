@@ -638,6 +638,35 @@ def create_app(
         from aegeanbench.sports.prompts.runtime_store import get_full_state
         return get_full_state()
 
+    @app.get("/api/v1/admin/prompts/baseline")
+    def get_baseline_prompts():
+        """
+        Return the read-only baseline prompts the product is appending to.
+        Lets the admin page show "here's what the system already says,
+        your global directive goes on top of this".
+        """
+        from aegeanbench.sports.prompts.loader import get_template
+        return {
+            "predict": {
+                "system_en": get_template("predict.system_en", default=""),
+                "system_zh_suffix": get_template("predict.system_zh_suffix", default=""),
+                "description": "Sent to every consensus agent during /api/v1/predict",
+            },
+            "answer": {
+                "system_en": get_template("qa.system_en", default=""),
+                "description": "Sent to the @-mentioned agent during /api/v1/agents/{id}/answer. "
+                                "Variables: {name}, {id}, {description}, {lang_rule}.",
+            },
+            "divination_tarot": {
+                "template_en": get_template("divination.tarot_en", default=""),
+                "description": "Tarot reading prompt for /api/v1/divination",
+            },
+            "divination_iching": {
+                "template_en": get_template("divination.iching_en", default=""),
+                "description": "I Ching reading prompt for /api/v1/divination",
+            },
+        }
+
     @app.post("/api/v1/admin/prompts/global")
     async def set_global_prompt(request: Request):
         """Replace the global prompt. Header X-Admin-Token required."""
