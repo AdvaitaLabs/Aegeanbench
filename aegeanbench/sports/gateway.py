@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from aegeanbench.sports.cache import FileCache, get_default_cache
 from aegeanbench.sports.models import Match, Team
@@ -46,6 +46,11 @@ class MatchContext:
     # Optional pre-match weather snapshot from OpenWeatherMap. None when
     # no API key is configured or the venue isn't known.
     weather: Optional[Dict[str, Any]] = None
+    # Optional chat-room snippet forwarded by the front-end so the
+    # ChatAgent / consensus prompt can see what the audience is saying.
+    # Carried on the context (not on Match.h2h_last5 - that would
+    # corrupt real head-to-head data).
+    chat_summary: Optional[str] = None
 
     def summary(self) -> str:
         """Compact one-line summary for logs."""

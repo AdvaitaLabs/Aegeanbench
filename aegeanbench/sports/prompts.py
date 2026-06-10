@@ -225,6 +225,11 @@ def build_user_prompt(ctx: MatchContext, focus: Optional[str] = None) -> str:
         parts.append(_format_weather(ctx.weather))
         parts.append("")
 
+    if getattr(ctx, "chat_summary", None):
+        parts.append("## Crowd / Chat Sentiment")
+        parts.append(ctx.chat_summary)
+        parts.append("")
+
     if focus:
         parts.append("## ANALYTICAL FOCUS")
         parts.append(_focus_hint(focus))

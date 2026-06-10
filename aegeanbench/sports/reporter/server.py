@@ -39,6 +39,12 @@ try:
         question: str
         match_id: Optional[str] = None
         match_context: Optional[str] = None
+        # When match_context is omitted but match_id + match_data are
+        # provided, the server fetches a role-specific brief (odds for
+        # market_specialist, lineups for player_specialist, etc.) and
+        # uses it as context. match_data accepts home_team/away_team/
+        # home_fifa/away_fifa/kickoff_at — all optional.
+        match_data: Optional[Dict[str, Any]] = None
         user_name: Optional[str] = None
         room_id: Optional[str] = None
         recent_messages: Optional[List[Dict[str, Any]]] = None
@@ -284,9 +290,12 @@ def create_app(
                 detail="at least one valid agent_id is required",
             )
 
-        # Compose a synthetic MatchContext for the AegeanPredictor
+        # Build the Match shell from the caller's body, then let the
+        # SportsDataGateway pull odds / lineups / h2h / xG / weather
+        # from the real adapters. The enriched ctx is what makes the
+        # consensus prompt non-empty.
         from aegeanbench.sports.predictors.aegean import AegeanPredictor
-        from aegeanbench.sports.gateway import MatchContext
+        from aegeanbench.sports.gateway import MatchContext, SportsDataGateway
         from aegeanbench.sports.models import (
             CompetitionStage, Match, Team,
         )
@@ -297,45 +306,66 @@ def create_app(
             _dt.fromisoformat(md.kickoff_at.replace("Z", "+00:00"))
             if md.kickoff_at else _dt.now()
         )
+
+        # FIFA code lookup table for the names the front-end is most
+        # likely to send. Falls back to the first 3 chars when unknown.
+        _FIFA = {
+            "Mexico": "MEX", "South Africa": "RSA", "United States": "USA",
+            "Argentina": "ARG", "Brazil": "BRA", "France": "FRA",
+            "Germany": "GER", "Spain": "ESP", "England": "ENG",
+            "Portugal": "POR", "Netherlands": "NED", "Italy": "ITA",
+            "Belgium": "BEL", "Croatia": "CRO", "Japan": "JPN",
+            "Korea Republic": "KOR", "South Korea": "KOR",
+            "Morocco": "MAR", "Saudi Arabia": "KSA",
+            "Canada": "CAN", "Australia": "AUS",
+        }
+        def _fifa(name: Optional[str], default: str) -> str:
+            if not name:
+                return default
+            return _FIFA.get(name, name[:3].upper())
+
         match = Match(
             match_id=body.match_id,
             competition="FIFA World Cup 2026",
             stage=CompetitionStage.GROUP,
             kickoff_at=kickoff,
             home_team=Team(
-                fifa_code=(md.home_team or "BRA")[:3].upper(),
+                fifa_code=_fifa(md.home_team, "BRA"),
                 name=md.home_team or "Home",
             ),
             away_team=Team(
-                fifa_code=(md.away_team or "ARG")[:3].upper(),
+                fifa_code=_fifa(md.away_team, "ARG"),
                 name=md.away_team or "Away",
             ),
             venue=md.venue,
         )
-        ctx = MatchContext(
-            match=match,
-            home_history=[],
-            away_history=[],
-            h2h=[],
-            home_xg_profile={},
-            away_xg_profile={},
-        )
 
-        # Inject chat messages into the agent_types for the predictor
-        predictor = AegeanPredictor(agent_types=requested)
+        # Singleton gateway so adapter HTTP clients and the file cache
+        # stay warm across requests. Lazy-built on first /predict.
+        gw = getattr(app.state, "gateway", None)
+        if gw is None:
+            gw = SportsDataGateway(mock=False)
+            app.state.gateway = gw
 
-        # Forward chat history into the chat_specialist via metadata.
-        # For sprint we simply concatenate messages onto the match's
-        # market_snapshot (the ChatAgent in mock mode will see them via
-        # the unified prompt). A future iteration plumbs them through a
-        # dedicated parameter.
+        try:
+            ctx = gw.build_context(match)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gateway.build_context failed for %s: %s", body.match_id, exc)
+            ctx = MatchContext(
+                match=match, home_history=[], away_history=[], h2h=[],
+                home_xg_profile={}, away_xg_profile={},
+            )
+
+        # Carry chat snapshot via ctx.chat_summary (NOT on match.h2h_last5
+        # — that field belongs to real head-to-head data and is now
+        # populated by the gateway).
         if body.chat_messages:
-            chat_summary = "\n".join(
+            ctx.chat_summary = "\n".join(
                 f"  - {m.user_name}: {m.text}"
                 for m in body.chat_messages[-30:]
             )
-            match.h2h_last5 = [{"chat_excerpt": chat_summary}]
 
+        predictor = AegeanPredictor(agent_types=requested)
         prediction = predictor.predict(ctx)
 
         return {
@@ -422,10 +452,29 @@ def create_app(
             )
         if not body.question:
             raise HTTPException(status_code=400, detail="'question' is required")
+
+        # Build a role-specific match brief unless the caller supplied
+        # match_context already. Market specialist gets odds, player
+        # specialist gets lineups, etc. The fetch is cached per
+        # (match_id, role) for 60s so chat-room bursts don't hammer
+        # upstream APIs.
+        match_context = body.match_context
+        if not match_context and body.match_id:
+            try:
+                from aegeanbench.sports.reporter.match_brief import build_brief_for_role
+                match_context = build_brief_for_role(
+                    role=agent_id,
+                    match_id=body.match_id,
+                    match_data=body.match_data,
+                )
+            except Exception as exc:
+                logger.warning("brief build failed: %s", exc)
+                match_context = None
+
         response = await app.state.qa_handler.answer(
             agent_id=agent_id,
             question=body.question,
-            match_context=body.match_context,
+            match_context=match_context,
             recent_messages=body.recent_messages,
             user_name=body.user_name,
             room_id=body.room_id,
