@@ -276,15 +276,6 @@ _FALLBACK_ICHING_TPL = (
 )
 
 
-def _append_runtime_addendum(text: str) -> str:
-    """Append the product-tuned global directive (if any) to the prompt."""
-    from aegeanbench.sports.prompts.runtime_store import get_current_prompt
-    add = get_current_prompt().strip()
-    if not add:
-        return text
-    return text.rstrip() + "\n\n## GLOBAL DIRECTIVE (product-tuned)\n" + add
-
-
 def _render_tarot_prompt(
     home_team: str,
     away_team: str,
@@ -298,13 +289,12 @@ def _render_tarot_prompt(
         for card in drawn
     )
     template = get_template("divination.tarot_en", default=_FALLBACK_TAROT_TPL)
-    rendered = template.format(
+    return template.format(
         home_team=home_team,
         away_team=away_team,
         cards_block=cards_block,
         lang_clause=_reading_lang_clause(lang),
     )
-    return _append_runtime_addendum(rendered)
 
 
 def _render_iching_prompt(
@@ -316,7 +306,7 @@ def _render_iching_prompt(
     """Render the I Ching prompt from prompts/templates.yaml + runtime addendum."""
     from aegeanbench.sports.prompts.loader import get_template
     template = get_template("divination.iching_en", default=_FALLBACK_ICHING_TPL)
-    rendered = template.format(
+    return template.format(
         home_team=home_team,
         away_team=away_team,
         hex_id=hexagram.get("id", ""),
@@ -324,7 +314,6 @@ def _render_iching_prompt(
         hex_keyword=hexagram.get("keyword", ""),
         lang_clause=_reading_lang_clause(lang),
     )
-    return _append_runtime_addendum(rendered)
 
 
 def _parse_llm_json(raw: str) -> Dict[str, Any]:

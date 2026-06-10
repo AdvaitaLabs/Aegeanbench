@@ -275,15 +275,6 @@ def _focus_hint(focus: str) -> str:
     return hints.get(focus, f"Focus on the '{focus}' lens of analysis.")
 
 
-def _append_runtime_addendum(system: str) -> str:
-    """Append the product-tunable global prompt (if any) to the system text."""
-    from aegeanbench.sports.prompts.runtime_store import get_current_prompt
-    addendum = get_current_prompt().strip()
-    if not addendum:
-        return system
-    return system.rstrip() + "\n\n## GLOBAL DIRECTIVE (product-tuned)\n" + addendum
-
-
 def build_full_prompt(
     ctx: MatchContext,
     focus: Optional[str] = None,
@@ -307,6 +298,6 @@ def build_full_prompt(
         if suffix:
             system = system.rstrip() + "\n\n" + suffix
     return {
-        "system": _append_runtime_addendum(system),
+        "system": system,
         "user": build_user_prompt(ctx, focus=focus),
     }

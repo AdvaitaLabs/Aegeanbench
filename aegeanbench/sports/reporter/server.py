@@ -176,9 +176,8 @@ def create_app(
         RuntimeError: when fastapi isn't installed.
     """
     try:
-        from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import HTMLResponse
     except ImportError as e:
         raise RuntimeError(
             "fastapi is required to use reporter.server. "
@@ -380,10 +379,10 @@ def create_app(
             )
 
         # Reply language priority:
-        #   1. body.lang (front-end's explicit choice from user locale)
+        #   1. body.lang (explicit override from caller)
         #   2. match_data.lang (legacy alias)
-        #   3. detected from chat snippets
-        #   4. English fallback
+        #   3. auto-detect from chat_messages (CJK in any msg -> zh)
+        #   4. English fallback when nothing is detectable
         from aegeanbench.sports.lang import detect_from_signals
         explicit_lang = body.lang or (
             body.match_data.model_dump().get("lang") if body.match_data else None
@@ -618,79 +617,6 @@ def create_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return result.to_dict()
-
-    # ---------- admin: runtime-tunable global prompt ----------
-
-    def _check_admin(request_token: Optional[str]) -> None:
-        """Block writes when the caller doesn't present the admin token."""
-        expected = os.getenv("ADMIN_TOKEN", "")
-        if not expected:
-            raise HTTPException(
-                status_code=503,
-                detail="ADMIN_TOKEN is not configured on the server",
-            )
-        if request_token != expected:
-            raise HTTPException(status_code=401, detail="invalid admin token")
-
-    @app.get("/api/v1/admin/prompts/global")
-    def get_global_prompt():
-        """Return the active global prompt addendum + last 5 versions."""
-        from aegeanbench.sports.prompts.runtime_store import get_full_state
-        return get_full_state()
-
-    @app.get("/api/v1/admin/prompts/baseline")
-    def get_baseline_prompts():
-        """
-        Return the read-only baseline prompts the product is appending to.
-        Lets the admin page show "here's what the system already says,
-        your global directive goes on top of this".
-        """
-        from aegeanbench.sports.prompts.loader import get_template
-        return {
-            "predict": {
-                "system_en": get_template("predict.system_en", default=""),
-                "system_zh_suffix": get_template("predict.system_zh_suffix", default=""),
-                "description": "Sent to every consensus agent during /api/v1/predict",
-            },
-            "answer": {
-                "system_en": get_template("qa.system_en", default=""),
-                "description": "Sent to the @-mentioned agent during /api/v1/agents/{id}/answer. "
-                                "Variables: {name}, {id}, {description}, {lang_rule}.",
-            },
-            "divination_tarot": {
-                "template_en": get_template("divination.tarot_en", default=""),
-                "description": "Tarot reading prompt for /api/v1/divination",
-            },
-            "divination_iching": {
-                "template_en": get_template("divination.iching_en", default=""),
-                "description": "I Ching reading prompt for /api/v1/divination",
-            },
-        }
-
-    @app.post("/api/v1/admin/prompts/global")
-    async def set_global_prompt(request: Request):
-        """Replace the global prompt. Header X-Admin-Token required."""
-        _check_admin(request.headers.get("X-Admin-Token"))
-        body = await request.json()
-        prompt = (body or {}).get("prompt", "")
-        if not isinstance(prompt, str):
-            raise HTTPException(status_code=400, detail="`prompt` must be a string")
-        updated_by = (body or {}).get("updated_by") or "admin"
-        from aegeanbench.sports.prompts.runtime_store import set_prompt
-        return set_prompt(prompt, updated_by=updated_by)
-
-    @app.post("/api/v1/admin/prompts/global/rollback")
-    async def rollback_global_prompt(request: Request):
-        """Revert to the most-recent history entry. Header X-Admin-Token required."""
-        _check_admin(request.headers.get("X-Admin-Token"))
-        from aegeanbench.sports.prompts.runtime_store import rollback_to_previous
-        return rollback_to_previous()
-
-    @app.get("/admin", response_class=HTMLResponse)
-    def admin_page():
-        """Tiny self-contained HTML form for the product team."""
-        from aegeanbench.sports.prompts.admin_page import ADMIN_HTML
-        return ADMIN_HTML
 
     # ---------- chat signal (chat-service notifying us of room activity) ----------
 

@@ -58,7 +58,6 @@ def _build_system_prompt(agent: Dict[str, Any], lang: str = "en") -> str:
     the product-tuned global directive (if set via the admin endpoint).
     """
     from aegeanbench.sports.prompts.loader import get_template
-    from aegeanbench.sports.prompts.runtime_store import get_current_prompt
     from aegeanbench.sports.lang import lang_directive
     template = get_template("qa.system_en", default=_FALLBACK_QA_SYSTEM)
     base = template.format(
@@ -67,9 +66,6 @@ def _build_system_prompt(agent: Dict[str, Any], lang: str = "en") -> str:
         description=agent.get("description", ""),
         lang_rule=lang_directive(lang),
     )
-    addendum = get_current_prompt().strip()
-    if addendum:
-        base = base.rstrip() + "\n\n## GLOBAL DIRECTIVE (product-tuned)\n" + addendum
     return base
 
 

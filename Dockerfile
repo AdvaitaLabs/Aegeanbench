@@ -36,8 +36,7 @@ COPY pyproject.toml requirements.txt README.md /app/
 # Persisted state directory (mounted from host in docker-compose)
 RUN mkdir -p /root/.aegeanbench/worldcup_runs \
              /root/.aegeanbench/sports_cache \
-             /root/.aegeanbench/kaggle \
-             /root/.aegeanbench/prompts
+             /root/.aegeanbench/kaggle
 
 EXPOSE 8200
 

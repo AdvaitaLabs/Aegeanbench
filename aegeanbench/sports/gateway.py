@@ -120,7 +120,13 @@ class SportsDataGateway:
         if not match.away_lineup:
             match.away_lineup = self.soccersapi.fetch_lineup(match.match_id, match.away_team.fifa_code)
         if not match.h2h_last5:
-            h2h = self.soccersapi.fetch_h2h(match.home_team.fifa_code, match.away_team.fifa_code)
+            # Pass match_id so soccersapi can use t=match_h2h&id=... — without
+            # it we fall back to mock h2h.
+            h2h = self.soccersapi.fetch_h2h(
+                match.home_team.fifa_code,
+                match.away_team.fifa_code,
+                match_id=match.match_id,
+            )
             match.h2h_last5 = [m.to_dict() for m in h2h]
         else:
             h2h = []
