@@ -28,6 +28,7 @@ an install hint if FastAPI is missing.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +39,8 @@ try:
         """JSON body schema for POST /api/v1/agents/{id}/answer."""
         question: str
         match_id: Optional[str] = None
+        # 'zh' or 'en'. When omitted, auto-detected from the question.
+        lang: Optional[str] = None
         match_context: Optional[str] = None
         # When match_context is omitted but match_id + match_data are
         # provided, the server fetches a role-specific brief (odds for
@@ -101,6 +104,10 @@ try:
         chat_messages: Optional[List[ChatMessageInput]] = None
         table_id: Optional[str] = None
         user_id: Optional[str] = None
+        # Reply language: 'zh' or 'en'. Front-end should pass this from
+        # the user's locale (zh-CN / en-US). When omitted the server
+        # tries chat_messages and falls back to English.
+        lang: Optional[str] = None
 
     class DivinationRequest(BaseModel):
         """
@@ -169,8 +176,9 @@ def create_app(
         RuntimeError: when fastapi isn't installed.
     """
     try:
-        from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
+        from fastapi.responses import HTMLResponse
     except ImportError as e:
         raise RuntimeError(
             "fastapi is required to use reporter.server. "
@@ -371,12 +379,15 @@ def create_app(
                 for m in body.chat_messages[-30:]
             )
 
-        # Pick prediction language from the chat snippets if any,
-        # otherwise default to English. Front-end can override by
-        # passing match_data.lang explicitly.
+        # Reply language priority:
+        #   1. body.lang (front-end's explicit choice from user locale)
+        #   2. match_data.lang (legacy alias)
+        #   3. detected from chat snippets
+        #   4. English fallback
         from aegeanbench.sports.lang import detect_from_signals
-        explicit_lang = (body.match_data.model_dump().get("lang")
-                         if body.match_data else None)
+        explicit_lang = body.lang or (
+            body.match_data.model_dump().get("lang") if body.match_data else None
+        )
         chat_texts = [m.text for m in (body.chat_messages or [])]
         lang = explicit_lang or detect_from_signals(None, chat_texts) or "en"
 
@@ -486,12 +497,13 @@ def create_app(
                 logger.warning("brief build failed: %s", exc)
                 match_context = None
 
-        # Auto-pick reply language from the user's question (CJK -> zh,
-        # otherwise en). recent_messages serve as a weak secondary
-        # signal when the question itself is too short to disambiguate.
+        # Reply language priority:
+        #   1. body.lang explicit from front-end (preferred)
+        #   2. detected from question text (CJK -> zh)
+        #   3. recent_messages as weak secondary signal
         from aegeanbench.sports.lang import detect_from_signals
         secondary = [m.get("text", "") for m in (body.recent_messages or [])]
-        lang = detect_from_signals(body.question, secondary)
+        lang = body.lang or detect_from_signals(body.question, secondary)
 
         response = await app.state.qa_handler.answer(
             agent_id=agent_id,
@@ -606,6 +618,50 @@ def create_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return result.to_dict()
+
+    # ---------- admin: runtime-tunable global prompt ----------
+
+    def _check_admin(request_token: Optional[str]) -> None:
+        """Block writes when the caller doesn't present the admin token."""
+        expected = os.getenv("ADMIN_TOKEN", "")
+        if not expected:
+            raise HTTPException(
+                status_code=503,
+                detail="ADMIN_TOKEN is not configured on the server",
+            )
+        if request_token != expected:
+            raise HTTPException(status_code=401, detail="invalid admin token")
+
+    @app.get("/api/v1/admin/prompts/global")
+    def get_global_prompt():
+        """Return the active global prompt addendum + last 5 versions."""
+        from aegeanbench.sports.prompts.runtime_store import get_full_state
+        return get_full_state()
+
+    @app.post("/api/v1/admin/prompts/global")
+    async def set_global_prompt(request: Request):
+        """Replace the global prompt. Header X-Admin-Token required."""
+        _check_admin(request.headers.get("X-Admin-Token"))
+        body = await request.json()
+        prompt = (body or {}).get("prompt", "")
+        if not isinstance(prompt, str):
+            raise HTTPException(status_code=400, detail="`prompt` must be a string")
+        updated_by = (body or {}).get("updated_by") or "admin"
+        from aegeanbench.sports.prompts.runtime_store import set_prompt
+        return set_prompt(prompt, updated_by=updated_by)
+
+    @app.post("/api/v1/admin/prompts/global/rollback")
+    async def rollback_global_prompt(request: Request):
+        """Revert to the most-recent history entry. Header X-Admin-Token required."""
+        _check_admin(request.headers.get("X-Admin-Token"))
+        from aegeanbench.sports.prompts.runtime_store import rollback_to_previous
+        return rollback_to_previous()
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def admin_page():
+        """Tiny self-contained HTML form for the product team."""
+        from aegeanbench.sports.prompts.admin_page import ADMIN_HTML
+        return ADMIN_HTML
 
     # ---------- chat signal (chat-service notifying us of room activity) ----------
 

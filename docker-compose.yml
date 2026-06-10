@@ -71,6 +71,7 @@ services:
       - ./data/runs:/root/.aegeanbench/worldcup_runs
       - ./data/cache:/root/.aegeanbench/sports_cache
       - ./data/kaggle:/root/.aegeanbench/kaggle
+      - ./data/prompts:/root/.aegeanbench/prompts
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8200/api/v1/health"]
       interval: 30s

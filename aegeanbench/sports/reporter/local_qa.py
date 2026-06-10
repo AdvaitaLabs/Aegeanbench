@@ -41,20 +41,36 @@ class QAResponse:
         }
 
 
+_FALLBACK_QA_SYSTEM = (
+    "You are {name} ({id}), a specialist in a World Cup 2026 prediction panel.\n"
+    "Role: {description}\n\n"
+    "Rules:\n"
+    " - {lang_rule}\n"
+    " - Answer in 2-4 sentences.\n"
+    " - Stay strictly within your specialty.\n"
+    " - Do NOT invent statistics. If you don't have the number, say so.\n"
+)
+
+
 def _build_system_prompt(agent: Dict[str, Any], lang: str = "en") -> str:
+    """
+    Render the QA system prompt from prompts/templates.yaml, then append
+    the product-tuned global directive (if set via the admin endpoint).
+    """
+    from aegeanbench.sports.prompts.loader import get_template
+    from aegeanbench.sports.prompts.runtime_store import get_current_prompt
     from aegeanbench.sports.lang import lang_directive
-    return (
-        f"You are {agent['name']} ({agent['id']}), a specialist in a "
-        f"World Cup 2026 prediction panel.\n"
-        f"Role: {agent['description']}\n\n"
-        f"Rules:\n"
-        f" - {lang_directive(lang)}\n"
-        f" - Answer in 2-4 sentences.\n"
-        f" - Stay strictly within your specialty. If the question is "
-        f"outside your role, briefly redirect to the right specialist.\n"
-        f" - Speak with conviction but acknowledge uncertainty where real.\n"
-        f" - Do NOT invent statistics. If you don't have the number, say so.\n"
+    template = get_template("qa.system_en", default=_FALLBACK_QA_SYSTEM)
+    base = template.format(
+        name=agent.get("name", ""),
+        id=agent.get("id", ""),
+        description=agent.get("description", ""),
+        lang_rule=lang_directive(lang),
     )
+    addendum = get_current_prompt().strip()
+    if addendum:
+        base = base.rstrip() + "\n\n## GLOBAL DIRECTIVE (product-tuned)\n" + addendum
+    return base
 
 
 def _build_user_prompt(

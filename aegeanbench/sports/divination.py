@@ -261,30 +261,50 @@ def _reading_lang_clause(lang: str) -> str:
     return "Write the reading in English, 3-4 sentences"
 
 
+_FALLBACK_TAROT_TPL = (
+    "You are a tarot reader at a football match: {home_team} vs {away_team}.\n"
+    "The user has drawn these three cards (past / present / future):\n"
+    "{cards_block}\n\n"
+    "{lang_clause}, mystical-but-grounded.\n"
+    "Then output strict JSON with reading + p_home_win/p_draw/p_away_win."
+)
+_FALLBACK_ICHING_TPL = (
+    "You are an I Ching reader at a football match: {home_team} vs {away_team}.\n"
+    "The user has cast hexagram {hex_id} ({hex_name}) meaning: {hex_keyword}.\n\n"
+    "{lang_clause}, culturally-grounded but playful.\n"
+    "Then output strict JSON with reading + p_home_win/p_draw/p_away_win."
+)
+
+
+def _append_runtime_addendum(text: str) -> str:
+    """Append the product-tuned global directive (if any) to the prompt."""
+    from aegeanbench.sports.prompts.runtime_store import get_current_prompt
+    add = get_current_prompt().strip()
+    if not add:
+        return text
+    return text.rstrip() + "\n\n## GLOBAL DIRECTIVE (product-tuned)\n" + add
+
+
 def _render_tarot_prompt(
     home_team: str,
     away_team: str,
     drawn: List[Dict[str, str]],
     lang: str = "en",
 ) -> str:
-    lines = [
-        f"You are a tarot reader at a football match: {home_team} vs {away_team}.",
-        "The user has drawn these three cards (past / present / future):",
-    ]
-    for card in drawn:
-        lines.append(
-            f"  - {card['position']}: {card['name']} ({card['keyword']})"
-        )
-    lines.extend([
-        "",
-        f"{_reading_lang_clause(lang)}, mystical-but-grounded.",
-        "Then estimate a probability distribution over the three outcomes.",
-        "Keep probabilities reasonable (do not output 0.99 or 0).",
-        "",
-        "OUTPUT FORMAT (strict JSON, keys in ASCII English):",
-        '{ "reading": "...", "p_home_win": 0.45, "p_draw": 0.30, "p_away_win": 0.25 }',
-    ])
-    return "\n".join(lines)
+    """Render the tarot prompt from prompts/templates.yaml + runtime addendum."""
+    from aegeanbench.sports.prompts.loader import get_template
+    cards_block = "\n".join(
+        f"  - {card['position']}: {card['name']} ({card['keyword']})"
+        for card in drawn
+    )
+    template = get_template("divination.tarot_en", default=_FALLBACK_TAROT_TPL)
+    rendered = template.format(
+        home_team=home_team,
+        away_team=away_team,
+        cards_block=cards_block,
+        lang_clause=_reading_lang_clause(lang),
+    )
+    return _append_runtime_addendum(rendered)
 
 
 def _render_iching_prompt(
@@ -293,16 +313,18 @@ def _render_iching_prompt(
     hexagram: Dict[str, str],
     lang: str = "en",
 ) -> str:
-    return (
-        f"You are an I Ching reader at a football match: {home_team} vs {away_team}.\n"
-        f"The user has cast hexagram {hexagram.get('id')} ({hexagram.get('name')}) "
-        f"meaning: {hexagram.get('keyword')}.\n\n"
-        f"{_reading_lang_clause(lang)}, culturally-grounded but playful.\n"
-        "Then estimate a probability distribution over the three outcomes.\n"
-        "Keep probabilities reasonable.\n\n"
-        "OUTPUT FORMAT (strict JSON, keys in ASCII English):\n"
-        '{ "reading": "...", "p_home_win": 0.45, "p_draw": 0.30, "p_away_win": 0.25 }'
+    """Render the I Ching prompt from prompts/templates.yaml + runtime addendum."""
+    from aegeanbench.sports.prompts.loader import get_template
+    template = get_template("divination.iching_en", default=_FALLBACK_ICHING_TPL)
+    rendered = template.format(
+        home_team=home_team,
+        away_team=away_team,
+        hex_id=hexagram.get("id", ""),
+        hex_name=hexagram.get("name", ""),
+        hex_keyword=hexagram.get("keyword", ""),
+        lang_clause=_reading_lang_clause(lang),
     )
+    return _append_runtime_addendum(rendered)
 
 
 def _parse_llm_json(raw: str) -> Dict[str, Any]:

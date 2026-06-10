@@ -23,28 +23,26 @@ from aegeanbench.sports.gateway import MatchContext
 from aegeanbench.sports.models import Match
 
 
-SYSTEM_PROMPT = """You are a professional football match analyst.
-Your job: given match context, output a probability distribution over
-the three possible match outcomes (home_win, draw, away_win).
-
-CRITICAL RULES:
-1. Output ONLY valid JSON, no prose before or after.
-2. The three probabilities MUST sum to exactly 1.0.
-3. Base your reasoning on the data provided. Do NOT use external knowledge
-   about which team you think is currently stronger - the data captures that.
-4. Be calibrated: do not over-confide. A typical international match has
-   home win ~40-45%, draw ~25-30%, away win ~25-30%.
-
-OUTPUT FORMAT (strict JSON):
-{
-  "p_home_win": 0.45,
-  "p_draw": 0.28,
-  "p_away_win": 0.27,
-  "confidence": 0.65,
-  "rationale": "Short one-paragraph explanation.",
-  "key_factors": ["factor 1", "factor 2", "factor 3"]
-}
+_FALLBACK_SYSTEM = """You are a professional football match analyst.
+Output strict JSON with keys p_home_win, p_draw, p_away_win, confidence,
+rationale, key_factors. Probabilities must sum to 1.0.
 """
+
+
+def _system_prompt() -> str:
+    """
+    Pull the /predict system prompt from templates.yaml so the product
+    team can tune wording without code changes. Falls back to a minimal
+    safe default if templates.yaml is missing.
+    """
+    from aegeanbench.sports.prompts.loader import get_template
+    return get_template("predict.system_en", default=_FALLBACK_SYSTEM)
+
+
+# Read at import time so call-sites that imported SYSTEM_PROMPT keep
+# working unchanged. build_full_prompt() re-reads via _system_prompt()
+# every request so edits take effect on aegeanbench restart.
+SYSTEM_PROMPT = _system_prompt()
 
 
 def _fmt_xg_line(xg: dict) -> str:
@@ -277,6 +275,15 @@ def _focus_hint(focus: str) -> str:
     return hints.get(focus, f"Focus on the '{focus}' lens of analysis.")
 
 
+def _append_runtime_addendum(system: str) -> str:
+    """Append the product-tunable global prompt (if any) to the system text."""
+    from aegeanbench.sports.prompts.runtime_store import get_current_prompt
+    addendum = get_current_prompt().strip()
+    if not addendum:
+        return system
+    return system.rstrip() + "\n\n## GLOBAL DIRECTIVE (product-tuned)\n" + addendum
+
+
 def build_full_prompt(
     ctx: MatchContext,
     focus: Optional[str] = None,
@@ -285,20 +292,21 @@ def build_full_prompt(
     """
     Return both system and user prompts as a dict.
 
-    When `lang='zh'` the model is instructed to write its `rationale`
-    field in Simplified Chinese. The JSON schema and the probability
-    fields stay English so downstream parsing is unaffected.
+    Reads the active system prompt from prompts/templates.yaml on every
+    call so product-team edits take effect after `docker compose
+    restart aegeanbench` without a redeploy.
+
+    When `lang='zh'` an extra directive (also from YAML) is appended so
+    the model writes its `rationale` in Simplified Chinese; the JSON
+    schema and probability fields stay English so parsing is unaffected.
     """
-    from aegeanbench.sports.lang import lang_directive
-    system = SYSTEM_PROMPT
+    from aegeanbench.sports.prompts.loader import get_template
+    system = get_template("predict.system_en", default=_FALLBACK_SYSTEM)
     if lang == "zh":
-        system = (
-            system + "\n\n"
-            "LANGUAGE: " + lang_directive("zh") + "\n"
-            "Specifically: write the `rationale` field in Simplified Chinese. "
-            "Keep all JSON keys, numeric values, and outcome labels in ASCII English."
-        )
+        suffix = get_template("predict.system_zh_suffix", default="")
+        if suffix:
+            system = system.rstrip() + "\n\n" + suffix
     return {
-        "system": system,
+        "system": _append_runtime_addendum(system),
         "user": build_user_prompt(ctx, focus=focus),
     }
