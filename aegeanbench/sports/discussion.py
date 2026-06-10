@@ -195,6 +195,13 @@ def parse_aegean_response_to_trace(
                 or (role_map.get(agent_id) if role_map else None)
                 or agent_id
             )
+            # Pull rationale from the JSON answer first (that's the real
+            # agent-authored reasoning); fall back to Solution.reasoning
+            # only when the JSON didn't include one. This avoids the
+            # "Refined based on peer solutions" boilerplate that
+            # MinimalAgent.refine_solution writes there in later rounds.
+            jr = _parse_rationale(sol.get("answer", "") or "")
+            rationale_text = jr or str(sol.get("reasoning", "") or "")
             agents_entries.append(
                 DiscussionAgentEntry(
                     agent_id=agent_id,
@@ -203,7 +210,7 @@ def parse_aegean_response_to_trace(
                     p_draw=probs.get("draw", 0.0),
                     p_away_win=probs.get("away_win", 0.0),
                     confidence=float(sol.get("confidence", 0.0)),
-                    rationale=str(sol.get("reasoning", ""))[:500],
+                    rationale=rationale_text[:500],
                     changed_position=(prev is not None and prev != argmax),
                     previous_argmax=prev,
                     current_argmax=argmax,
@@ -252,25 +259,45 @@ def parse_aegean_response_to_trace(
     )
 
 
-def _parse_probs(answer_blob: str) -> Dict[str, float]:
-    """Robustly extract the 3 probabilities from a JSON answer string."""
+def _parse_answer_blob(answer_blob: str) -> Dict[str, Any]:
+    """Best-effort parse of the agent's JSON answer; returns {} on failure."""
     import json
     import re
     try:
-        data = json.loads(answer_blob)
+        return json.loads(answer_blob)
     except (json.JSONDecodeError, TypeError):
         m = re.search(r"\{.*\}", answer_blob or "", re.DOTALL)
         if not m:
-            return {"home_win": 1/3, "draw": 1/3, "away_win": 1/3}
+            return {}
         try:
-            data = json.loads(m.group(0))
+            return json.loads(m.group(0))
         except json.JSONDecodeError:
-            return {"home_win": 1/3, "draw": 1/3, "away_win": 1/3}
+            return {}
+
+
+def _parse_probs(answer_blob: str) -> Dict[str, float]:
+    """Robustly extract the 3 probabilities from a JSON answer string."""
+    data = _parse_answer_blob(answer_blob)
+    if not data:
+        return {"home_win": 1/3, "draw": 1/3, "away_win": 1/3}
     return {
         "home_win": float(data.get("p_home_win", 0.0)),
         "draw": float(data.get("p_draw", 0.0)),
         "away_win": float(data.get("p_away_win", 0.0)),
     }
+
+
+def _parse_rationale(answer_blob: str) -> str:
+    """
+    Extract the 'rationale' (or 'reasoning') string from the JSON answer.
+    Falls back to the raw text trimmed when no JSON is present.
+    """
+    data = _parse_answer_blob(answer_blob)
+    for k in ("rationale", "reasoning", "explanation"):
+        v = data.get(k)
+        if v:
+            return str(v)
+    return ""
 
 
 def _argmax(probs: Dict[str, float]) -> str:
