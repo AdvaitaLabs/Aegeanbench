@@ -163,6 +163,58 @@ def _brief_weather(match_data: Dict[str, Any], gw) -> str:
     return f"Match-day weather ({venue_city}):\n" + _format_weather(w)
 
 
+# ----------------------------- match-id auto resolve -----------------------------
+
+
+_match_info_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
+
+
+def _resolve_match_info(match_id: str) -> Dict[str, str]:
+    """
+    Auto-resolve team names + FIFA codes from soccersapi by match_id when
+    the caller didn't pass match_data. 5-minute cache. Returns {} on
+    failure so the brief falls back to "Home / Away".
+    """
+    hit = _match_info_cache.get(match_id)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+
+    import os
+    user = os.getenv("AEGEANBENCH_SOCCERSAPI_USER")
+    token = os.getenv("AEGEANBENCH_SOCCERSAPI_KEY")
+    if not user or not token:
+        return {}
+    try:
+        import requests
+        r = requests.get(
+            "https://api.soccersapi.com/v2.2/fixtures/",
+            params={"user": user, "token": token, "t": "info", "id": match_id},
+            timeout=8,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        data = payload.get("data") or {}
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        teams = data.get("teams") or {}
+        home = teams.get("home") or {}
+        away = teams.get("away") or {}
+        info = {
+            "home_team": home.get("name", "Home"),
+            "away_team": away.get("name", "Away"),
+            "home_fifa": (home.get("country_iso") or home.get("short_code")
+                          or _fifa_guess(home.get("name", "Home"))),
+            "away_fifa": (away.get("country_iso") or away.get("short_code")
+                          or _fifa_guess(away.get("name", "Away"))),
+            "venue_city": (data.get("venue") or {}).get("city", ""),
+        }
+        _match_info_cache[match_id] = (time.time(), info)
+        return info
+    except Exception as e:
+        logger.warning("soccersapi t=info lookup failed for %s: %s", match_id, e)
+        return {}
+
+
 # ----------------------------- top-level dispatch -----------------------------
 
 
@@ -170,7 +222,7 @@ _BRIEF_FNS = {
     "market_specialist":  ["odds"],
     "player_specialist":  ["lineup"],
     "strategy_specialist": ["h2h", "lineup"],
-    "stats_specialist":   ["h2h"],
+    "stats_specialist":   ["h2h", "odds"],
     "news_specialist":    ["weather", "h2h"],
 }
 
@@ -196,7 +248,13 @@ def build_brief_for_role(
     if cached is not None:
         return cached
 
-    md = match_data or {}
+    # Merge caller-supplied match_data with auto-resolved match info.
+    # Caller wins where it supplies a value; missing fields are filled
+    # from the soccersapi lookup. This means the front-end can omit
+    # match_data entirely and still get a correct brief.
+    md = dict(match_data or {})
+    if not md.get("home_team") or not md.get("away_team"):
+        md = {**_resolve_match_info(match_id), **md}
     home_team = md.get("home_team", "Home")
     away_team = md.get("away_team", "Away")
     home_fifa = md.get("home_fifa") or _fifa_guess(home_team)
