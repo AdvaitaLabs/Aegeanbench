@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +69,22 @@ def _format_odds(odds_list) -> str:
     if not odds_list:
         return "  (no odds available)"
     # Top 3 by inverse margin (tightest book first)
-    rows = []
-    for o in odds_list[:5]:
+    # Rank by tightest book first (lowest margin = sharpest price) and
+    # only surface the top 3. The model doesn't need 18 lines of nearly-
+    # identical numbers — that just dilutes attention and risks empty
+    # responses on stricter Praka tiers.
+    rows: List[Tuple[float, str]] = []
+    for o in odds_list:
         if not o.home_win or not o.draw or not o.away_win:
             continue
         margin = (1 / o.home_win) + (1 / o.draw) + (1 / o.away_win) - 1
-        rows.append(
+        rows.append((
+            margin,
             f"  {o.bookmaker:<15} home {o.home_win:.2f}  draw {o.draw:.2f}  "
             f"away {o.away_win:.2f}  (margin {margin*100:.1f}%)"
-        )
-    return "\n".join(rows) if rows else "  (no usable odds rows)"
+        ))
+    rows.sort(key=lambda r: r[0])
+    return "\n".join(r[1] for r in rows[:3]) if rows else "  (no usable odds rows)"
 
 
 def _format_h2h(h2h_matches) -> str:

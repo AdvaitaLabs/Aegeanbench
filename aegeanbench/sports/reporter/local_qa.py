@@ -152,9 +152,22 @@ class LocalQAHandler:
                     {"role": "user", "content": user},
                 ],
                 temperature=0.3,
-                max_tokens=400,
+                max_tokens=800,
             )
-            text = (resp.choices[0].message.content or "").strip() or "(empty response)"
+            text = (resp.choices[0].message.content or "").strip()
+            if not text:
+                # Empty content from the provider — log enough to diagnose
+                # (finish_reason often says 'length' or 'content_filter').
+                finish = getattr(resp.choices[0], "finish_reason", None)
+                logger.warning(
+                    "LLM returned empty content for %s (finish_reason=%s, "
+                    "prompt_chars=%d)", agent_id, finish, len(system) + len(user),
+                )
+                text = (
+                    f"({agent['name']}) The model returned no text "
+                    f"(finish_reason={finish}). Try asking a more specific "
+                    f"question or pick a different agent."
+                )
             usage = getattr(resp, "usage", None)
             return QAResponse(
                 agent_id=agent_id, question=question, room_id=room_id,
