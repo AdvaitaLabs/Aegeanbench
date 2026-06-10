@@ -135,40 +135,37 @@ class LocalQAHandler:
             )
 
         try:
-            import httpx
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={
-                        "model": agent.get("model") or self.model,
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 400,
-                    },
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-                text = (
-                    payload.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .strip()
-                ) or "(empty response)"
-                usage = payload.get("usage") or {}
-                return QAResponse(
-                    agent_id=agent_id, question=question, room_id=room_id,
-                    answer=text,
-                    confidence=0.75,
-                    model=payload.get("model") or self.model,
-                    metadata={
-                        "role": agent_id,
-                        "tokens": usage.get("total_tokens"),
-                    },
-                )
+            # Use the openai SDK (same path aegean-consensus uses for Praka).
+            # Praka rejects some raw-httpx variants with 503 even when the
+            # SDK path works — likely due to header/UA expectations on
+            # their gateway. Keep this aligned with the consensus client.
+            import openai
+            client = openai.AsyncOpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                timeout=self.timeout,
+            )
+            resp = await client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.3,
+                max_tokens=400,
+            )
+            text = (resp.choices[0].message.content or "").strip() or "(empty response)"
+            usage = getattr(resp, "usage", None)
+            return QAResponse(
+                agent_id=agent_id, question=question, room_id=room_id,
+                answer=text,
+                confidence=0.75,
+                model=getattr(resp, "model", None) or self.model,
+                metadata={
+                    "role": agent_id,
+                    "tokens": getattr(usage, "total_tokens", None) if usage else None,
+                },
+            )
         except Exception as e:
             logger.warning("LocalQAHandler LLM call failed (%s); returning fallback", e)
             return QAResponse(
