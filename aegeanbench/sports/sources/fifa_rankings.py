@@ -25,7 +25,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +102,76 @@ def _fetch_live_rankings() -> Optional[Dict[str, int]]:
         except Exception as e:
             logger.warning("Override FIFA CSV fetch failed: %s", e)
 
-    # 2) Wikipedia scrape (default)
+    # 2) eloratings.net (default - more stable than Wikipedia for Docker IPs)
+    elo_result = _fetch_from_eloratings()
+    if elo_result:
+        return elo_result
+
+    # 3) Wikipedia (last resort, rate-limited from shared IPs)
     return _fetch_from_wikipedia()
+
+
+def _fetch_from_eloratings() -> Optional[Dict[str, int]]:
+    """
+    Pull national-team strength from eloratings.net's CSV endpoint.
+
+    eloratings.net publishes daily Elo ratings for every national team
+    going back to 1872. Unlike Wikipedia they don't rate-limit Docker
+    IPs aggressively, and the CSV format is stable.
+
+    We convert Elo rating to a rank (1=highest Elo). Elo is actually a
+    BETTER strength signal than FIFA rank — FIFA's points system has
+    quirks; Elo updates after every match.
+    """
+    try:
+        import requests
+    except ImportError:
+        return None
+
+    # eloratings.net publishes national-team Elo ratings as a public
+    # TSV. Free, no key, stable for years.
+    url_national = "https://www.eloratings.net/World.tsv"
+    headers = {"User-Agent": "Mozilla/5.0 AegeanBench/0.2 (research)"}
+
+    try:
+        r = requests.get(url_national, headers=headers, timeout=10)
+        if r.status_code != 200 or len(r.text) < 1000:
+            logger.warning("eloratings.net World.tsv -> HTTP %s (%d bytes)",
+                           r.status_code, len(r.text or ""))
+            return None
+    except Exception as e:
+        logger.warning("eloratings.net fetch failed: %s", e)
+        return None
+
+    # TSV columns we care about: name, elo  (the file is tab-separated)
+    out: Dict[str, Tuple[int, float]] = {}  # name -> (rank, elo)
+    rank_by_elo: list = []
+    for line in r.text.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        name = parts[0].strip()
+        try:
+            elo = float(parts[1].strip())
+        except ValueError:
+            continue
+        rank_by_elo.append((elo, name))
+
+    if not rank_by_elo:
+        return None
+
+    # Sort descending by Elo, position 1 = highest
+    rank_by_elo.sort(key=lambda x: -x[0])
+    result: Dict[str, int] = {}
+    for i, (_elo, name) in enumerate(rank_by_elo, start=1):
+        code = _NAME_TO_CODE.get(name.lower())
+        if code:
+            result[code] = i
+    if len(result) < 30:
+        logger.warning("eloratings.net yielded only %d named teams", len(result))
+        return None
+    logger.info("FIFA-style ranking from eloratings.net (%d teams)", len(result))
+    return result
 
 
 def _fetch_from_wikipedia() -> Optional[Dict[str, int]]:

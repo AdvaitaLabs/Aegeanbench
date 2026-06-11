@@ -211,6 +211,30 @@ def create_app(
     app.state.qa_handler = qa_handler
     app.state.scheduler = scheduler
 
+    # Pre-warm cold caches in a background thread at boot so the first
+    # /answer or /predict doesn't wait for: (a) the martj42 results CSV
+    # download (~3 MB, ~2-3s) and (b) the FIFA rank live fetch. Both
+    # have their own internal cache; this just triggers it eagerly.
+    def _prewarm():
+        try:
+            from aegeanbench.sports.sources.international_results import _load_rows
+            n = len(_load_rows())
+            logger.info("prewarm: international_results loaded %d matches", n)
+        except Exception as e:
+            logger.warning("prewarm international_results failed: %s", e)
+        try:
+            from aegeanbench.sports.sources.fifa_rankings import (
+                _get_rankings, last_source,
+            )
+            n = len(_get_rankings())
+            logger.info("prewarm: fifa_rankings loaded %d teams (source=%s)",
+                        n, last_source())
+        except Exception as e:
+            logger.warning("prewarm fifa_rankings failed: %s", e)
+
+    import threading
+    threading.Thread(target=_prewarm, daemon=True, name="prewarm").start()
+
     def _all_runs():
         runs = []
         if runs_root.exists():
