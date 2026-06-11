@@ -43,5 +43,9 @@ EXPOSE 8200
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fs http://localhost:8200/api/v1/health || exit 1
 
+# Single worker so the in-process prediction cache + LiveEventPoller
+# are shared across requests. Most of our latency is LLM time, and the
+# event loop handles concurrent requests fine; multiple workers would
+# each maintain their own cache and re-pay the 25s consensus cost.
 CMD ["uvicorn", "aegeanbench.sports.reporter.server:app", \
-     "--host", "0.0.0.0", "--port", "8200", "--workers", "2"]
+     "--host", "0.0.0.0", "--port", "8200", "--workers", "1"]
