@@ -211,6 +211,39 @@ def create_app(
     app.state.qa_handler = qa_handler
     app.state.scheduler = scheduler
 
+    # Prediction cache (60s TTL, LRU) so repeated /predict for the same
+    # table doesn't re-run consensus. Goal/red-card events from the
+    # live poller invalidate the relevant match below.
+    from aegeanbench.sports.reporter.prediction_cache import PredictionCache
+    app.state.prediction_cache = PredictionCache()
+
+    # Live event poller wired into the asyncio loop on app startup. It
+    # asks soccersapi every 30s for in-play matches, pushes events
+    # onto the WebSocket channel, and invalidates the prediction cache
+    # when high-priority events (goal / red card / half-time / full-
+    # time) land. Soft-fails if the soccersapi plan doesn't cover
+    # events — logged once, then idle.
+    from aegeanbench.sports.live.poller import LiveEventPoller
+
+    @app.on_event("startup")
+    async def _start_live_poller():
+        if os.getenv("LIVE_POLLER_DISABLED", "").lower() in ("1", "true", "yes"):
+            logger.info("LIVE_POLLER_DISABLED is set — poller not started")
+            return
+        poller = LiveEventPoller(
+            live_hub=live_hub,
+            scheduler=scheduler,
+            prediction_cache=app.state.prediction_cache,
+        )
+        poller.start()
+        app.state.live_poller = poller
+
+    @app.on_event("shutdown")
+    async def _stop_live_poller():
+        poller = getattr(app.state, "live_poller", None)
+        if poller is not None:
+            await poller.stop()
+
     # Pre-warm cold caches in a background thread at boot so the first
     # /answer or /predict doesn't wait for: (a) the martj42 results CSV
     # download (~3 MB, ~2-3s) and (b) the FIFA rank live fetch. Both
@@ -416,13 +449,32 @@ def create_app(
         chat_texts = [m.text for m in (body.chat_messages or [])]
         lang = explicit_lang or detect_from_signals(None, chat_texts) or "en"
 
+        # Cache check before paying the 20-30s consensus cost
+        cache = app.state.prediction_cache
+        cache_key = cache.make_key(
+            match_id=body.match_id,
+            agent_ids=requested,
+            lang=lang,
+            chat_messages=body.chat_messages,
+        )
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            # Echo back with cache flag so the client can show "cached".
+            cached = dict(cached_payload)
+            meta = dict(cached.get("_meta") or {})
+            meta["cache_hit"] = True
+            cached["_meta"] = meta
+            cached["table_id"] = body.table_id   # echo per-caller field
+            return cached
+
         predictor = AegeanPredictor(agent_types=requested)
         prediction = predictor.predict(ctx, lang=lang)
 
-        return {
+        payload = {
             "_meta": {
                 "endpoint": "POST /api/v1/predict",
                 "description": "One-shot consensus prediction for a user-defined table",
+                "cache_hit": False,
             },
             "table_id": body.table_id,
             "match_id": body.match_id,
@@ -438,6 +490,8 @@ def create_app(
             },
             "discussion": (prediction.metadata or {}).get("discussion"),
         }
+        cache.put(cache_key, match_id=body.match_id, payload=payload)
+        return payload
 
     # ---------- bundle endpoints (reduce frontend chattiness) ----------
 
@@ -643,6 +697,13 @@ def create_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return result.to_dict()
+
+    # ---------- ops: cache stats ----------
+
+    @app.get("/api/v1/_stats/cache")
+    def get_cache_stats():
+        """Cheap diagnostic for ops/dev — predict-cache hit rate."""
+        return app.state.prediction_cache.stats()
 
     # ---------- chat signal (chat-service notifying us of room activity) ----------
 
