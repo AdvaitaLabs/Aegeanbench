@@ -26,6 +26,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# curl is needed by the Docker HEALTHCHECK at the bottom of this file.
+# The builder stage has its own curl, but multi-stage runtime starts
+# from a clean python:3.11-slim, so we re-install it here.
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy installed packages from builder
 COPY --from=builder /root/.local /root/.local
 
