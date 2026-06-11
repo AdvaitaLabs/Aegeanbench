@@ -56,12 +56,28 @@ def _fmt_xg_line(xg: dict) -> str:
             return f"{v*100:.0f}%" if pct else f"{v:{suffix}}"
         except (ValueError, TypeError):
             return "?"
-    return (
+    base = (
         f"xG_for {_num('xg_for', '.2f')}, "
         f"xG_against {_num('xg_against', '.2f')}, "
         f"possession {_num('possession', pct=True)}, "
         f"PPDA {_num('ppda', '.1f')}"
     )
+    # When the profile carries real recent-form numbers (from
+    # martj42 international results), append them so the LLM sees the
+    # empirical record alongside the (still rank-derived) possession/PPDA.
+    extra = []
+    if xg.get("matches_played") is not None:
+        extra.append(
+            f"recent {xg.get('matches_played', '?')} games: "
+            f"{xg.get('wins', 0)}W-{xg.get('draws', 0)}D-{xg.get('losses', 0)}L"
+        )
+    if xg.get("last5_streak"):
+        extra.append(f"last5 streak: {xg['last5_streak']}")
+    if xg.get("fifa_rank"):
+        extra.append(f"FIFA rank #{xg['fifa_rank']}")
+    if extra:
+        base += " | " + ", ".join(extra)
+    return base
 
 
 def _format_recent_form(history) -> str:

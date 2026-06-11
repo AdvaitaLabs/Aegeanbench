@@ -126,6 +126,42 @@ def _format_lineup(players, per_position_cap: int = 3) -> str:
     return "\n".join(rows) if rows else "  (lineup not posted yet)"
 
 
+def _brief_form(
+    home_fifa: str,
+    away_fifa: str,
+    home_team: str,
+    away_team: str,
+) -> str:
+    """
+    Real recent form for both sides: last 12 months of international
+    matches via the martj42 dataset. This is the *empirical* number set
+    that lets stats_specialist say "Mexico averaged 1.4 GF / 0.2 GA
+    over 10 games, 5-2-0 W-D-L" instead of guessing.
+    """
+    from aegeanbench.sports.sources.international_results import form_profile
+    home_fp = form_profile(home_fifa, last_n=10, window_days=365)
+    away_fp = form_profile(away_fifa, last_n=10, window_days=365)
+
+    def _render(team_label: str, fp: Dict[str, Any]) -> List[str]:
+        if fp.get("source") != "martj42/international_results":
+            return [f"  {team_label}: (recent form data unavailable)"]
+        return [
+            f"  {team_label} — last {fp['matches_played']} internationals "
+            f"({fp.get('window_days', 365)}d):",
+            f"    Record: {fp['wins']}W {fp['draws']}D {fp['losses']}L "
+            f"(win rate {int(fp['win_rate']*100)}%)",
+            f"    Avg goals: {fp['goals_for_per_game']} scored / "
+            f"{fp['goals_against_per_game']} conceded per game",
+            f"    Last 5 streak (most recent first): {fp.get('last5_streak', '?')}",
+        ]
+
+    lines = ["Recent form (real results, source: martj42 international dataset):"]
+    lines += _render(home_team, home_fp)
+    lines.append("")
+    lines += _render(away_team, away_fp)
+    return "\n".join(lines)
+
+
 def _format_weather(w: Optional[Dict[str, Any]]) -> str:
     if not w:
         return "  (weather not available)"
@@ -314,10 +350,10 @@ def _resolve_match_info(match_id: str) -> Dict[str, str]:
 
 _BRIEF_FNS = {
     "market_specialist":  ["odds"],
-    "player_specialist":  ["lineup"],
-    "strategy_specialist": ["h2h", "lineup"],
-    "stats_specialist":   ["h2h", "odds"],
-    "news_specialist":    ["weather", "h2h"],
+    "player_specialist":  ["lineup", "form"],
+    "strategy_specialist": ["h2h", "lineup", "form"],
+    "stats_specialist":   ["form", "h2h", "odds"],
+    "news_specialist":    ["weather", "h2h", "form"],
 }
 
 
@@ -356,6 +392,8 @@ def build_brief_for_role(
 
     gw = _gateway()
     sections = [f"Match {match_id}: {home_team} vs {away_team}"]
+    if "form" in needs:
+        sections.append(_brief_form(home_fifa, away_fifa, home_team, away_team))
     if "odds" in needs:
         sections.append(_brief_market(match_id, gw))
     if "h2h" in needs:
