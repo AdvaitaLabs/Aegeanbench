@@ -228,8 +228,9 @@ def create_app(
     @app.on_event("startup")
     async def _start_live_poller():
         if os.getenv("LIVE_POLLER_DISABLED", "").lower() in ("1", "true", "yes"):
-            logger.info("LIVE_POLLER_DISABLED is set — poller not started")
+            logger.warning("LIVE_POLLER_DISABLED is set — poller not started")
             return
+        logger.warning("startup hook: building LiveEventPoller")
         poller = LiveEventPoller(
             live_hub=live_hub,
             scheduler=scheduler,

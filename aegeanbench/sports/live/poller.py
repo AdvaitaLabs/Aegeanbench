@@ -59,7 +59,8 @@ class LiveEventPoller:
             return
         loop = asyncio.get_event_loop()
         self._task = loop.create_task(self._run_forever(), name="live-poller")
-        logger.info("LiveEventPoller started (interval=%.0fs)", self.interval)
+        # Use warning level so the message survives default INFO filtering.
+        logger.warning("LiveEventPoller started (interval=%.0fs)", self.interval)
 
     async def stop(self) -> None:
         if self._task is None:
