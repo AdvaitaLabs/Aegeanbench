@@ -105,13 +105,33 @@ class FBrefAdapter(SourceAdapter):
             possession: avg possession share (0-1)
             ppda: passes per defensive action (lower = more press)
         """
-        # International xG data is sparse on FBref (national teams play
-        # ~10 matches/year, no full-season tables). Instead of scraping
-        # club-level noise, derive a profile from the published FIFA
-        # ranking — it's real, grounded data, just rank-derived not
-        # per-match xG. Top-ranked teams get higher xg_for + lower PPDA.
+        # Prefer EMPIRICAL form from real international match results
+        # (martj42 dataset). When that's unavailable (network down,
+        # team not in the index) fall back to the FIFA-rank-derived
+        # approximation. Empirical: real goals scored / conceded over
+        # last N matches. Rank-derived: a formula from FIFA position.
+        from aegeanbench.sports.sources.international_results import form_profile
         from aegeanbench.sports.sources.fifa_rankings import derive_xg_profile
+
+        empirical = form_profile(fifa_code, last_n=10, window_days=365)
         rank_profile = derive_xg_profile(fifa_code)
+        if empirical.get("source") == "martj42/international_results":
+            # Merge: real goals as xG, rank-derived ppda/possession as
+            # secondary signal (those still aren't measured for free).
+            merged = {
+                "xg_for": empirical["goals_for_per_game"],
+                "xg_against": empirical["goals_against_per_game"],
+                "possession": rank_profile["possession"],
+                "ppda": rank_profile["ppda"],
+                "fifa_rank": rank_profile["fifa_rank"],
+                "matches_played": empirical["matches_played"],
+                "wins": empirical["wins"],
+                "draws": empirical["draws"],
+                "losses": empirical["losses"],
+                "last5_streak": empirical["last5_streak"],
+                "source": "intl_results+rank",
+            }
+            rank_profile = merged
 
         policy = self._resolve_policy(policy)
         if policy.mock:
