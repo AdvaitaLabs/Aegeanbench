@@ -185,22 +185,69 @@ class SportsDataGateway:
 
         return ctx
 
+    # World Cup 2026 venue -> host city map. football-data returns the
+    # stadium name ("Azteca", "MetLife Stadium") not the city, so we
+    # need this lookup before calling OpenWeather. Substring match is
+    # used so "Estadio Azteca" still resolves to Mexico City.
+    _VENUE_TO_CITY: Dict[str, str] = {
+        # Mexico
+        "azteca":          "Mexico City",
+        "estadio azteca":  "Mexico City",
+        "bbva":            "Monterrey",
+        "estadio bbva":    "Monterrey",
+        "akron":           "Guadalajara",
+        "estadio akron":   "Guadalajara",
+        # USA
+        "at&t stadium":    "Dallas",
+        "at&t":            "Dallas",
+        "sofi":            "Los Angeles",
+        "sofi stadium":    "Los Angeles",
+        "metlife":         "New York",
+        "metlife stadium": "New York",
+        "mercedes-benz":   "Atlanta",
+        "lincoln financial": "Philadelphia",
+        "hard rock":       "Miami",
+        "nrg":             "Houston",
+        "nrg stadium":     "Houston",
+        "levi's":          "San Francisco",
+        "levis":           "San Francisco",
+        "arrowhead":       "Kansas City",
+        "gillette":        "Boston",
+        "lumen":           "Seattle",
+        "lumen field":     "Seattle",
+        # Canada
+        "bmo":             "Toronto",
+        "bmo field":       "Toronto",
+        "bc place":        "Vancouver",
+    }
+
+    def _resolve_venue_city(self, venue_text: str) -> Optional[str]:
+        v = (venue_text or "").lower().strip()
+        if not v:
+            return None
+        # Try venue-name keys first (most specific)
+        for key, city in self._VENUE_TO_CITY.items():
+            if key in v:
+                return city
+        # Fall back to the older direct city-name match
+        for city in HOST_CITIES.keys():
+            if city.lower() in v:
+                return city
+        return None
+
     def _fetch_weather_for_match(self, match: Match) -> Optional[Dict[str, Any]]:
         """
         Resolve venue text to a known city, then call OpenWeather.
         Returns None when the venue doesn't include a recognised city.
         """
-        venue = (match.venue or "").lower()
-        if not venue:
+        city = self._resolve_venue_city(match.venue or "")
+        if not city:
             return None
-        for city in HOST_CITIES.keys():
-            if city.lower() in venue:
-                try:
-                    return self.weather.fetch_for_match(city, match.kickoff_at)
-                except Exception as e:
-                    logger.warning("weather fetch failed for %s: %s", city, e)
-                    return None
-        return None
+        try:
+            return self.weather.fetch_for_match(city, match.kickoff_at)
+        except Exception as e:
+            logger.warning("weather fetch failed for %s: %s", city, e)
+            return None
 
     def load_training_history(self, num_matches: int = 500) -> List[Match]:
         """For Dixon-Coles / Elo training: pull many historical matches."""

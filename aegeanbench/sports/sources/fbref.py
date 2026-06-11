@@ -105,11 +105,21 @@ class FBrefAdapter(SourceAdapter):
             possession: avg possession share (0-1)
             ppda: passes per defensive action (lower = more press)
         """
+        # International xG data is sparse on FBref (national teams play
+        # ~10 matches/year, no full-season tables). Instead of scraping
+        # club-level noise, derive a profile from the published FIFA
+        # ranking — it's real, grounded data, just rank-derived not
+        # per-match xG. Top-ranked teams get higher xg_for + lower PPDA.
+        from aegeanbench.sports.sources.fifa_rankings import derive_xg_profile
+        rank_profile = derive_xg_profile(fifa_code)
+
         policy = self._resolve_policy(policy)
         if policy.mock:
-            return _MOCK_XG_TABLE.get(fifa_code, _DEFAULT_PROFILE)
+            # Even in mock we prefer FIFA-rank-derived over the hardcoded
+            # _MOCK_XG_TABLE (which only had a handful of teams).
+            return rank_profile
 
-        # Live mode: cache lookup -> scrape -> fallback to mock on error
+        # Live mode: cache lookup -> scrape -> fall back to rank profile
         cache_key = ("fbref", "xg_profile", fifa_code)
         cached = self.cache.get(*cache_key, ttl=timedelta(hours=6))
         if cached is not None:
@@ -118,9 +128,8 @@ class FBrefAdapter(SourceAdapter):
         try:
             profile = self._scrape_xg_profile(fifa_code)
         except Exception as e:
-            logger.warning("fbref scrape failed for %s (%s); using mock", fifa_code, e)
-            profile = _MOCK_XG_TABLE.get(fifa_code, _DEFAULT_PROFILE)
-            return profile
+            logger.warning("fbref scrape failed for %s (%s); using fifa-rank derived", fifa_code, e)
+            return rank_profile
 
         self.cache.set(profile, *cache_key)
         return profile
