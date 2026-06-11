@@ -76,63 +76,131 @@ _FIFA_CODE_ALIASES: Dict[str, str] = {
 
 def _fetch_live_rankings() -> Optional[Dict[str, int]]:
     """
-    Try to pull the live FIFA ranking JSON. Returns None on any failure
-    (network error, blocked, schema change). Caller falls back to the
-    hardcoded snapshot when this returns None.
+    Pull live FIFA ranks from a community-maintained CSV. We try multiple
+    sources in order so a single repo going stale doesn't break us; the
+    first one that yields >=200 entries wins. The override URL via env
+    var AEGEANBENCH_FIFA_CSV_URL lets you swap in any FIFA-rank CSV that
+    has the columns we expect:
+        rank,country,country_full,country_abrv,total_points,...
+
+    Returns None on full failure so the caller drops to the hardcoded
+    fallback rather than serving empty data.
     """
     try:
         import requests
     except ImportError:
         return None
-    url = "https://inside.fifa.com/api/ranking-overview"
-    # FIFA's site needs a real-browser UA, otherwise WAF returns 403.
+
+    override = os.getenv("AEGEANBENCH_FIFA_CSV_URL", "").strip()
+    candidates = [u for u in [
+        override,
+        # Maintained community mirrors of FIFA's official rankings.
+        # These are CSV exports of the monthly FIFA publication; if they
+        # rot, the env var override above lets us re-point.
+        "https://raw.githubusercontent.com/cashncarry/FIFA-Ranking-Predictor/main/fifa_ranking.csv",
+        "https://raw.githubusercontent.com/cashncarry/FIFA-Ranking-Predictor/master/fifa_ranking.csv",
+    ] if u]
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) "
             "AppleWebKit/605.1.15 (KHTML, like Gecko) "
             "Version/17.0 Safari/605.1.15"
         ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://inside.fifa.com/fifa-world-ranking/men",
     }
-    try:
-        r = requests.get(url, headers=headers, timeout=8,
-                         params={"locale": "en", "category": "men"})
-        if r.status_code != 200:
-            logger.warning("FIFA ranking endpoint returned HTTP %s", r.status_code)
-            return None
-        payload = r.json()
-    except Exception as e:
-        logger.warning("FIFA ranking fetch failed: %s", e)
-        return None
-
-    # FIFA's payload shape (verified empirically; tolerant on missing keys):
-    #   {"rankings": [{"countryCode": "ARG", "rank": 1, ...}, ...]}
-    # If the schema changes, drop to fallback.
-    rows = payload.get("rankings") or payload.get("entries") or []
-    if not isinstance(rows, list) or not rows:
-        logger.warning("FIFA payload has no 'rankings' list; schema may have changed")
-        return None
-
-    out: Dict[str, int] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        code = (row.get("countryCode") or row.get("country_code")
-                or row.get("tag") or "").upper().strip()
-        rank = row.get("rank") or row.get("position")
-        if not code or rank is None:
-            continue
+    for url in candidates:
         try:
-            out[code] = int(rank)
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code != 200 or not r.text:
+                logger.warning("FIFA CSV %s -> HTTP %s", url, r.status_code)
+                continue
+        except Exception as e:
+            logger.warning("FIFA CSV fetch failed for %s: %s", url, e)
+            continue
+
+        parsed = _parse_fifa_csv(r.text)
+        if parsed and len(parsed) >= 200:
+            logger.info("FIFA ranking parsed from %s (%d teams)", url, len(parsed))
+            return parsed
+        logger.warning("FIFA CSV %s yielded only %d entries", url, len(parsed or {}))
+
+    return None
+
+
+def _parse_fifa_csv(text: str) -> Dict[str, int]:
+    """
+    Parse a FIFA ranking CSV into {3-letter-code: rank}. Picks the
+    LATEST snapshot when the file is a long history (rank_date column).
+    Tolerates a handful of column-name variations across community repos.
+    """
+    import csv, io
+    out: Dict[str, int] = {}
+    reader = csv.DictReader(io.StringIO(text))
+    if reader.fieldnames is None:
+        return out
+
+    cols = {c.lower(): c for c in reader.fieldnames}
+    rank_col = (cols.get("rank") or cols.get("position")
+                or cols.get("ranking") or cols.get("current_rank"))
+    code_col = (cols.get("country_abrv") or cols.get("country_abbr")
+                or cols.get("countryabbr") or cols.get("country_code")
+                or cols.get("code") or cols.get("tla"))
+    name_col = (cols.get("country_full") or cols.get("country_name")
+                or cols.get("country") or cols.get("team"))
+    date_col = (cols.get("rank_date") or cols.get("date")
+                or cols.get("ranking_date"))
+
+    if rank_col is None or (code_col is None and name_col is None):
+        return out
+
+    # First pass: find the latest snapshot date (if applicable)
+    latest_date = ""
+    if date_col:
+        for row in reader:
+            d = (row.get(date_col) or "").strip()
+            if d > latest_date:
+                latest_date = d
+        # csv.DictReader is single-pass; re-read.
+        reader = csv.DictReader(io.StringIO(text))
+
+    for row in reader:
+        if date_col and latest_date:
+            if (row.get(date_col) or "").strip() != latest_date:
+                continue
+        code = ""
+        if code_col:
+            code = (row.get(code_col) or "").upper().strip()
+        if not code and name_col:
+            code = _NAME_TO_CODE.get((row.get(name_col) or "").strip().lower(), "")
+        try:
+            rank = int(row.get(rank_col) or 0)
         except (TypeError, ValueError):
             continue
-    if len(out) < 20:
-        # Sanity check: a real payload has 200+ countries
-        logger.warning("FIFA payload only yielded %d entries; using fallback", len(out))
-        return None
+        if code and 1 <= rank <= 250:
+            out[code] = rank
     return out
+
+
+# Country full-name -> 3-letter code, used when a CSV only has the name.
+_NAME_TO_CODE: Dict[str, str] = {
+    "argentina": "ARG", "spain": "ESP", "france": "FRA", "england": "ENG",
+    "brazil": "BRA", "portugal": "POR", "netherlands": "NED",
+    "belgium": "BEL", "germany": "GER", "croatia": "CRO", "italy": "ITA",
+    "uruguay": "URU", "morocco": "MAR", "colombia": "COL",
+    "united states": "USA", "usa": "USA", "mexico": "MEX",
+    "japan": "JPN", "switzerland": "SUI", "denmark": "DEN",
+    "senegal": "SEN", "poland": "POL", "korea republic": "KOR",
+    "south korea": "KOR", "australia": "AUS", "ecuador": "ECU",
+    "austria": "AUT", "wales": "WAL", "ukraine": "UKR", "tunisia": "TUN",
+    "ivory coast": "CIV", "côte d'ivoire": "CIV", "cote d'ivoire": "CIV",
+    "peru": "PER", "serbia": "SRB", "egypt": "EGY", "paraguay": "PAR",
+    "türkiye": "TUR", "turkey": "TUR", "norway": "NOR",
+    "venezuela": "VEN", "panama": "PAN", "canada": "CAN", "qatar": "QAT",
+    "saudi arabia": "KSA", "jordan": "JOR", "uzbekistan": "UZB",
+    "south africa": "RSA", "iran": "IRN", "ir iran": "IRN",
+    "jamaica": "JAM", "costa rica": "CRC", "ghana": "GHA",
+    "cape verde": "CPV", "cabo verde": "CPV",
+}
 
 
 def _save_cache(rankings: Dict[str, int]) -> None:
