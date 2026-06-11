@@ -216,10 +216,12 @@ def create_app(
     # download (~3 MB, ~2-3s) and (b) the FIFA rank live fetch. Both
     # have their own internal cache; this just triggers it eagerly.
     def _prewarm():
+        # Use logger.warning so messages survive INFO->WARNING filtering
+        # in production. These run once at boot, not noisy.
         try:
             from aegeanbench.sports.sources.international_results import _load_rows
             n = len(_load_rows())
-            logger.info("prewarm: international_results loaded %d matches", n)
+            logger.warning("prewarm: international_results loaded %d matches", n)
         except Exception as e:
             logger.warning("prewarm international_results failed: %s", e)
         try:
@@ -227,8 +229,8 @@ def create_app(
                 _get_rankings, last_source,
             )
             n = len(_get_rankings())
-            logger.info("prewarm: fifa_rankings loaded %d teams (source=%s)",
-                        n, last_source())
+            logger.warning("prewarm: fifa_rankings loaded %d teams (source=%s)",
+                           n, last_source())
         except Exception as e:
             logger.warning("prewarm fifa_rankings failed: %s", e)
 

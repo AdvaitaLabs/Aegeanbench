@@ -143,35 +143,47 @@ def _fetch_from_eloratings() -> Optional[Dict[str, int]]:
         logger.warning("eloratings.net fetch failed: %s", e)
         return None
 
-    # TSV columns we care about: name, elo  (the file is tab-separated)
-    out: Dict[str, Tuple[int, float]] = {}  # name -> (rank, elo)
-    rank_by_elo: list = []
+    # eloratings.net TSV format (verified 2026-06):
+    #   col 0: position
+    #   col 1: rank
+    #   col 2: 2-letter country code (ES, AR, FR, EN, BR, ...)
+    #   col 3: current Elo rating
+    # We just need col 0 (rank) and col 2 (2-letter code) -> map to FIFA 3-letter.
+    result: Dict[str, int] = {}
     for line in r.text.splitlines():
         parts = line.split("\t")
-        if len(parts) < 2:
+        if len(parts) < 3:
             continue
-        name = parts[0].strip()
         try:
-            elo = float(parts[1].strip())
+            rank = int(parts[0].strip())
         except ValueError:
             continue
-        rank_by_elo.append((elo, name))
-
-    if not rank_by_elo:
-        return None
-
-    # Sort descending by Elo, position 1 = highest
-    rank_by_elo.sort(key=lambda x: -x[0])
-    result: Dict[str, int] = {}
-    for i, (_elo, name) in enumerate(rank_by_elo, start=1):
-        code = _NAME_TO_CODE.get(name.lower())
-        if code:
-            result[code] = i
+        code2 = parts[2].strip().upper()
+        code3 = _ELO_TO_FIFA.get(code2)
+        if code3:
+            result[code3] = rank
     if len(result) < 30:
-        logger.warning("eloratings.net yielded only %d named teams", len(result))
+        logger.warning("eloratings.net yielded only %d mapped teams", len(result))
         return None
     logger.info("FIFA-style ranking from eloratings.net (%d teams)", len(result))
     return result
+
+
+# eloratings.net uses a 2-letter code system that is mostly ISO-3166 alpha-2
+# but with a few quirks (EN for England, KR for Korea, etc.). Map them to
+# our 3-letter FIFA codes. Only WC 2026 teams + a few major nations.
+_ELO_TO_FIFA: Dict[str, str] = {
+    "ES": "ESP", "AR": "ARG", "FR": "FRA", "EN": "ENG", "BR": "BRA",
+    "PT": "POR", "CO": "COL", "NL": "NED", "EC": "ECU", "DE": "GER",
+    "IT": "ITA", "BE": "BEL", "HR": "CRO", "UY": "URU", "MA": "MAR",
+    "US": "USA", "MX": "MEX", "JP": "JPN", "CH": "SUI", "DK": "DEN",
+    "SN": "SEN", "PL": "POL", "KR": "KOR", "AU": "AUS", "AT": "AUT",
+    "WS": "WAL", "WL": "WAL", "UA": "UKR", "TN": "TUN", "CI": "CIV",
+    "PE": "PER", "RS": "SRB", "EG": "EGY", "PY": "PAR", "TR": "TUR",
+    "NO": "NOR", "VE": "VEN", "PA": "PAN", "CA": "CAN", "QA": "QAT",
+    "SA": "KSA", "JO": "JOR", "UZ": "UZB", "ZA": "RSA", "IR": "IRN",
+    "JM": "JAM", "CR": "CRC", "GH": "GHA", "CV": "CPV",
+}
 
 
 def _fetch_from_wikipedia() -> Optional[Dict[str, int]]:
