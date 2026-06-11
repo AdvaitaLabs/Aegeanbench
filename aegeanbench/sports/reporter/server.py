@@ -375,6 +375,35 @@ def create_app(
         from datetime import datetime as _dt
 
         md = body.match_data or MatchDataInput()
+
+        # If the caller didn't supply home/away team, auto-resolve from
+        # the match_id via soccersapi's t=info endpoint. Otherwise the
+        # old BRA/ARG defaults would silently predict the wrong match.
+        if not md.home_team or not md.away_team:
+            from aegeanbench.sports.reporter.match_brief import _resolve_match_info
+            resolved = _resolve_match_info(body.match_id)
+            if resolved:
+                home_t = md.home_team or resolved.get("home_team")
+                away_t = md.away_team or resolved.get("away_team")
+                # Pydantic v2: model_copy keeps other fields, updates these
+                md = md.model_copy(update={
+                    "home_team": home_t,
+                    "away_team": away_t,
+                    "venue": md.venue or resolved.get("venue_city"),
+                })
+
+        # If we STILL don't have team names, the front-end gave us a
+        # match_id we can't look up. Fail loud rather than silently
+        # predicting the wrong match.
+        if not md.home_team or not md.away_team:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Could not resolve teams for match_id={body.match_id}. "
+                    "Pass match_data with home_team and away_team explicitly."
+                ),
+            )
+
         kickoff = (
             _dt.fromisoformat(md.kickoff_at.replace("Z", "+00:00"))
             if md.kickoff_at else _dt.now()
@@ -403,12 +432,12 @@ def create_app(
             stage=CompetitionStage.GROUP,
             kickoff_at=kickoff,
             home_team=Team(
-                fifa_code=_fifa(md.home_team, "BRA"),
-                name=md.home_team or "Home",
+                fifa_code=_fifa(md.home_team, md.home_team[:3].upper() if md.home_team else "???"),
+                name=md.home_team,
             ),
             away_team=Team(
-                fifa_code=_fifa(md.away_team, "ARG"),
-                name=md.away_team or "Away",
+                fifa_code=_fifa(md.away_team, md.away_team[:3].upper() if md.away_team else "???"),
+                name=md.away_team,
             ),
             venue=md.venue,
         )
@@ -471,11 +500,28 @@ def create_app(
         predictor = AegeanPredictor(agent_types=requested)
         prediction = predictor.predict(ctx, lang=lang)
 
+        # Detect whether this was a real consensus run or a fallback to
+        # mock. The predictor sets rationale to "[mock] ..." and
+        # tokens_used==0 + latency_ms<=1 when it bailed. We refuse to
+        # cache these so a single Praka hiccup doesn't poison 60 seconds
+        # of identical requests.
+        is_mock = (
+            prediction.rationale.startswith("[mock")
+            or (prediction.tokens_used == 0 and prediction.latency_ms <= 1)
+        )
+        if is_mock:
+            logger.warning(
+                "predict for %s fell back to mock (latency=%dms, tokens=%d)"
+                " — NOT caching",
+                body.match_id, prediction.latency_ms, prediction.tokens_used,
+            )
+
         payload = {
             "_meta": {
                 "endpoint": "POST /api/v1/predict",
                 "description": "One-shot consensus prediction for a user-defined table",
                 "cache_hit": False,
+                "is_mock": is_mock,
             },
             "table_id": body.table_id,
             "match_id": body.match_id,
@@ -491,7 +537,10 @@ def create_app(
             },
             "discussion": (prediction.metadata or {}).get("discussion"),
         }
-        cache.put(cache_key, match_id=body.match_id, payload=payload)
+        # Only cache real predictions. Mock / failed responses bypass
+        # the cache so the next attempt re-runs against fresh state.
+        if not is_mock:
+            cache.put(cache_key, match_id=body.match_id, payload=payload)
         return payload
 
     # ---------- bundle endpoints (reduce frontend chattiness) ----------

@@ -212,13 +212,42 @@ def _extract_json(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # Last resort: find first balanced {...} block
+    # Last resort A: find first balanced {...} block
     brace_match = re.search(r"\{.*\}", text, re.DOTALL)
     if brace_match:
         try:
             return json.loads(brace_match.group(0))
         except json.JSONDecodeError:
             pass
+
+    # Last resort B: response was TRUNCATED by max_tokens. The JSON
+    # never closed, so no brace match. But the numeric fields land at
+    # the START of the JSON before the long `rationale`, so we can
+    # still pull them out with per-field regexes. Better to surface a
+    # half-parsed result than fall all the way back to mock.
+    salvaged: Dict[str, Any] = {}
+    field_regexes = {
+        "p_home_win": r'"p_home_win"\s*:\s*([\d.]+)',
+        "p_draw":     r'"p_draw"\s*:\s*([\d.]+)',
+        "p_away_win": r'"p_away_win"\s*:\s*([\d.]+)',
+        "confidence": r'"confidence"\s*:\s*([\d.]+)',
+    }
+    for key, pattern in field_regexes.items():
+        m = re.search(pattern, text)
+        if m:
+            try:
+                salvaged[key] = float(m.group(1))
+            except ValueError:
+                pass
+    # Salvage rationale (string) too, even if it's truncated
+    rat_match = re.search(r'"rationale"\s*:\s*"([^"]*)', text, re.DOTALL)
+    if rat_match:
+        salvaged["rationale"] = rat_match.group(1).strip()
+    if "p_home_win" in salvaged and "p_away_win" in salvaged:
+        # Got the essentials. Mark as salvaged so callers can flag it.
+        salvaged.setdefault("rationale", "(rationale truncated)")
+        salvaged["_salvaged_from_truncation"] = True
+        return salvaged
 
     raise ValueError(f"Could not parse JSON from LLM response: {text[:200]!r}")
 

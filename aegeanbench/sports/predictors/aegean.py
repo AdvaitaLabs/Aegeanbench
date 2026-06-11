@@ -81,7 +81,10 @@ class AegeanPredictor(Predictor):
         mock: Optional[bool] = None,
         quorum_threshold: float = 0.6,
         max_rounds: int = 4,
-        timeout: float = 60.0,
+        # Bumped from 60s after seeing real-world 8-agent × 4-round runs
+        # take 70-90s under Praka load. 120s gives headroom; nginx is
+        # tuned to 120s upstream timeout to match.
+        timeout: float = 120.0,
     ):
         self.base_url = (
             base_url
@@ -107,7 +110,15 @@ class AegeanPredictor(Predictor):
         try:
             return self._real_predict(ctx, prompts)
         except Exception as e:
-            logger.warning("Aegean real call failed (%s); falling back to mock", e)
+            # Log with exc_info so we can see WHERE it failed: timeout
+            # vs HTTP error vs schema mismatch all look different in the
+            # traceback. Without this, intermittent mocks are
+            # invisible in production.
+            logger.warning(
+                "Aegean real call failed for match=%s (%s: %s); falling back to mock",
+                ctx.match.match_id, type(e).__name__, e,
+                exc_info=True,
+            )
             return self._mock_predict(ctx, prompts)
 
     # ----------------------- real path -----------------------
