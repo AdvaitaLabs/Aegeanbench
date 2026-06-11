@@ -76,54 +76,99 @@ _FIFA_CODE_ALIASES: Dict[str, str] = {
 
 def _fetch_live_rankings() -> Optional[Dict[str, int]]:
     """
-    Pull live FIFA ranks from a community-maintained CSV. We try multiple
-    sources in order so a single repo going stale doesn't break us; the
-    first one that yields >=200 entries wins. The override URL via env
-    var AEGEANBENCH_FIFA_CSV_URL lets you swap in any FIFA-rank CSV that
-    has the columns we expect:
-        rank,country,country_full,country_abrv,total_points,...
+    Pull live FIFA Men's ranking from Wikipedia. The article's ranking
+    table is wikitext-stable (the same row format for years), much more
+    reliable than FIFA's JS-rendered site or churned community repos.
+    The MediaWiki API gives us parsed HTML we can regex without a heavy
+    HTML parser dep.
 
-    Returns None on full failure so the caller drops to the hardcoded
-    fallback rather than serving empty data.
+    A CSV override via env AEGEANBENCH_FIFA_CSV_URL still wins when set.
     """
     try:
         import requests
     except ImportError:
         return None
 
+    # 1) Env-var CSV override (if user pinned a specific source)
     override = os.getenv("AEGEANBENCH_FIFA_CSV_URL", "").strip()
-    candidates = [u for u in [
-        override,
-        # Maintained community mirrors of FIFA's official rankings.
-        # These are CSV exports of the monthly FIFA publication; if they
-        # rot, the env var override above lets us re-point.
-        "https://raw.githubusercontent.com/cashncarry/FIFA-Ranking-Predictor/main/fifa_ranking.csv",
-        "https://raw.githubusercontent.com/cashncarry/FIFA-Ranking-Predictor/master/fifa_ranking.csv",
-    ] if u]
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-            "Version/17.0 Safari/605.1.15"
-        ),
-    }
-    for url in candidates:
+    if override:
         try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code != 200 or not r.text:
-                logger.warning("FIFA CSV %s -> HTTP %s", url, r.status_code)
-                continue
+            r = requests.get(override, timeout=10)
+            if r.status_code == 200 and r.text:
+                parsed = _parse_fifa_csv(r.text)
+                if parsed and len(parsed) >= 50:
+                    logger.info("FIFA ranking parsed from override CSV (%d teams)", len(parsed))
+                    return parsed
         except Exception as e:
-            logger.warning("FIFA CSV fetch failed for %s: %s", url, e)
-            continue
+            logger.warning("Override FIFA CSV fetch failed: %s", e)
 
-        parsed = _parse_fifa_csv(r.text)
-        if parsed and len(parsed) >= 200:
-            logger.info("FIFA ranking parsed from %s (%d teams)", url, len(parsed))
-            return parsed
-        logger.warning("FIFA CSV %s yielded only %d entries", url, len(parsed or {}))
+    # 2) Wikipedia scrape (default)
+    return _fetch_from_wikipedia()
 
+
+def _fetch_from_wikipedia() -> Optional[Dict[str, int]]:
+    """
+    Scrape Wikipedia's FIFA Men's World Ranking table via MediaWiki API.
+    The page has the current top ~30 teams in a sortable table; we
+    extract (rank, country, FIFA code) rows.
+    """
+    try:
+        import re
+        import requests
+    except ImportError:
+        return None
+
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "parse",
+        "page": "FIFA Men's World Ranking",
+        "prop": "wikitext",
+        "format": "json",
+        "section": "1",  # "Current ranking" section
+    }
+    headers = {"User-Agent": "AegeanBench/0.2 (worldcup-2026; football research)"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        wikitext = (r.json().get("parse") or {}).get("wikitext", {}).get("*", "")
+    except Exception as e:
+        logger.warning("Wikipedia FIFA ranking fetch failed: %s", e)
+        return None
+
+    if not wikitext or "{{fb" not in wikitext.lower():
+        logger.warning("Wikipedia FIFA ranking page has no fb templates; using fallback")
+        return None
+
+    # Wikipedia uses {{fb|XYZ}} templates where XYZ is a 3-letter code.
+    # The table rows look like:
+    #   | 1 || {{steady}} || {{fb|ARG}} || 1886.16 || ...
+    # We pair each numeric rank cell with the next {{fb|CODE}} we see.
+    out: Dict[str, int] = {}
+    rank_pattern = re.compile(r"\|\s*(\d{1,3})\s*\|\|")
+    code_pattern = re.compile(r"\{\{\s*fb(?:r|f)?\s*\|\s*([A-Z]{3})\s*[\|}]", re.IGNORECASE)
+
+    # Walk line by line; remember the last seen rank, attach the next code
+    last_rank: Optional[int] = None
+    for line in wikitext.splitlines():
+        rm = rank_pattern.search(line)
+        if rm:
+            try:
+                cand = int(rm.group(1))
+                if 1 <= cand <= 250:
+                    last_rank = cand
+            except ValueError:
+                pass
+        cm = code_pattern.search(line)
+        if cm and last_rank is not None:
+            code = cm.group(1).upper()
+            if code not in out:
+                out[code] = last_rank
+                last_rank = None  # consume so next rank attaches to next code
+
+    if len(out) >= 30:
+        logger.info("FIFA ranking parsed from Wikipedia (%d teams)", len(out))
+        return out
+    logger.warning("Wikipedia parse yielded only %d entries", len(out))
     return None
 
 
