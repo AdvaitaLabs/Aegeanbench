@@ -81,10 +81,11 @@ class AegeanPredictor(Predictor):
         mock: Optional[bool] = None,
         quorum_threshold: float = 0.6,
         max_rounds: int = 4,
-        # Bumped from 60s after seeing real-world 8-agent × 4-round runs
-        # take 70-90s under Praka load. 120s gives headroom; nginx is
-        # tuned to 120s upstream timeout to match.
-        timeout: float = 120.0,
+        # Bumped from 60s -> 120s -> 150s. The richer prompt (likely_
+        # scores / halves / top_scorers extra fields) makes outputs
+        # 30-40% longer, so consensus can run ~110-140s under Praka
+        # load. nginx upstream timeout is 180s so we keep margin.
+        timeout: float = 150.0,
     ):
         self.base_url = (
             base_url

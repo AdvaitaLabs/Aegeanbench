@@ -160,8 +160,10 @@ class LiveEventPoller:
                 "match_id": match.match_id,
                 "minute": ev.minute,
                 "kind": ev.kind.value,
-                "team": ev.team,
-                "player": ev.player,
+                # LiveEvent dataclass uses team_fifa_code + player_name,
+                # not team/player. Old shorthand crashed every tick.
+                "team": ev.team_fifa_code,
+                "player": ev.player_name,
                 "detail": ev.detail or "",
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
