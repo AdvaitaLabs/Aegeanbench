@@ -126,6 +126,49 @@ def _format_lineup(players, per_position_cap: int = 3) -> str:
     return "\n".join(rows) if rows else "  (lineup not posted yet)"
 
 
+def _brief_injuries(
+    home_team: str,
+    away_team: str,
+    md: Dict[str, Any],
+    gw,
+) -> str:
+    """
+    Real injuries / suspensions from soccersapi t=sidelined. Needs the
+    soccersapi team_id (different from football-data's). We resolve it
+    via the live /livescores response (which carries teams.home.id and
+    teams.away.id) — caller passes through match_data.
+    """
+    home_sa_id = md.get("home_soccersapi_id")
+    away_sa_id = md.get("away_soccersapi_id")
+    if not home_sa_id and not away_sa_id:
+        return "Injuries/suspensions: (team ids not resolved yet)"
+
+    def _format_block(label: str, team_id) -> str:
+        if not team_id:
+            return f"  {label}: (id unknown)"
+        try:
+            data = gw.soccersapi.fetch_sidelined(int(team_id))
+        except Exception as e:
+            logger.warning("sidelined fetch failed for %s: %s", team_id, e)
+            return f"  {label}: (lookup failed)"
+        inj = data.get("injuries") or []
+        sus = data.get("suspensions") or []
+        if not inj and not sus:
+            return f"  {label}: clean — no current injuries or suspensions"
+        parts = []
+        for row in inj[:5]:
+            p = (row.get("player") or {}).get("name", "?")
+            parts.append(f"injury: {p} ({row.get('description', '—')})")
+        for row in sus[:5]:
+            p = (row.get("player") or {}).get("name", "?")
+            parts.append(f"suspended: {p}")
+        return f"  {label}: " + "; ".join(parts)
+
+    return "Sidelined (real, source: soccersapi):\n" + \
+        _format_block(home_team, home_sa_id) + "\n" + \
+        _format_block(away_team, away_sa_id)
+
+
 def _brief_form(
     home_fifa: str,
     away_fifa: str,
@@ -336,6 +379,10 @@ def _resolve_match_info(match_id: str) -> Dict[str, str]:
                           or _fifa_guess(home.get("name", "Home"))),
             "away_fifa": (away.get("country_iso") or away.get("short_code")
                           or _fifa_guess(away.get("name", "Away"))),
+            # Carry soccersapi team_id forward so /sidelined etc. can
+            # look up injuries without another /info round-trip.
+            "home_soccersapi_id": home.get("id"),
+            "away_soccersapi_id": away.get("id"),
             "venue_city": (data.get("venue") or {}).get("city", ""),
         }
         _match_info_cache[match_id] = (time.time(), info)
@@ -350,10 +397,10 @@ def _resolve_match_info(match_id: str) -> Dict[str, str]:
 
 _BRIEF_FNS = {
     "market_specialist":  ["odds"],
-    "player_specialist":  ["lineup", "form"],
+    "player_specialist":  ["lineup", "form", "injuries"],
     "strategy_specialist": ["h2h", "lineup", "form"],
     "stats_specialist":   ["form", "h2h", "odds"],
-    "news_specialist":    ["weather", "h2h", "form"],
+    "news_specialist":    ["weather", "h2h", "form", "injuries"],
 }
 
 
@@ -409,6 +456,8 @@ def build_brief_for_role(
             match_id, home_fifa, away_fifa, gw,
             home_team_name=home_team, away_team_name=away_team,
         ))
+    if "injuries" in needs:
+        sections.append(_brief_injuries(home_team, away_team, md, gw))
     if "weather" in needs:
         wx = _brief_weather(md, gw)
         if wx:

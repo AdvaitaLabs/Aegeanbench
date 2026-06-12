@@ -28,6 +28,29 @@ from aegeanbench.sports.models import (
 )
 
 
+# Map "what the front-end might call this team" -> list of names
+# football-data actually uses. Keys + values normalised to upper case.
+# Add entries here whenever a new provider name shows up.
+_TEAM_NAME_ALIASES: Dict[str, tuple] = {
+    "CZECH REPUBLIC":    ("CZECHIA",),
+    "CZECHIA":           ("CZECH REPUBLIC",),
+    "REPUBLIC OF KOREA": ("KOREA REPUBLIC", "SOUTH KOREA"),
+    "SOUTH KOREA":       ("KOREA REPUBLIC", "REPUBLIC OF KOREA"),
+    "KOREA REPUBLIC":    ("SOUTH KOREA", "REPUBLIC OF KOREA"),
+    "UNITED STATES":     ("USA", "UNITED STATES OF AMERICA"),
+    "USA":               ("UNITED STATES", "UNITED STATES OF AMERICA"),
+    "IVORY COAST":       ("CÔTE D'IVOIRE", "COTE D'IVOIRE"),
+    "CÔTE D'IVOIRE":     ("IVORY COAST",),
+    "COTE D'IVOIRE":     ("IVORY COAST",),
+    "SAUDI ARABIA":      ("KSA",),
+    "KSA":               ("SAUDI ARABIA",),
+    "TÜRKIYE":           ("TURKEY",),
+    "TURKEY":            ("TÜRKIYE",),
+    "CAPE VERDE":        ("CABO VERDE",),
+    "CABO VERDE":        ("CAPE VERDE",),
+}
+
+
 def _mock_squad_for(team_name_or_code: str) -> List[Player]:
     """Tiny mock so callers never get an empty list during outages."""
     code = (team_name_or_code or "???")[:3].upper()
@@ -306,14 +329,32 @@ class FootballDataAdapter(SourceAdapter):
         return self._wc_team_id_cache
 
     def resolve_team_id(self, team_name_or_code: str, policy: Optional[FetchPolicy] = None) -> Optional[int]:
-        """Translate a team name or FIFA code into football-data team_id."""
+        """
+        Translate a team name or FIFA code into football-data team_id.
+
+        Tolerant of provider naming differences:
+            - "Czech Republic" / "Czechia"
+            - "Korea Republic" / "Republic of Korea" / "South Korea"
+            - "USA" / "United States"
+            - "Saudi Arabia" / "KSA"
+            - "Ivory Coast" / "Côte d'Ivoire"
+        """
         if not team_name_or_code:
             return None
         policy = self._resolve_policy(policy)
         if policy.mock:
             return None
         mapping = self._wc_teams_by_name(policy)
-        return mapping.get(team_name_or_code.upper())
+        target = team_name_or_code.upper()
+        hit = mapping.get(target)
+        if hit:
+            return hit
+        # Try known aliases when the direct name miss
+        for alias in _TEAM_NAME_ALIASES.get(target, ()):
+            hit = mapping.get(alias.upper())
+            if hit:
+                return hit
+        return None
 
     def fetch_squad(
         self,

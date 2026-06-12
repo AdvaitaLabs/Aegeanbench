@@ -534,6 +534,13 @@ def create_app(
                 "rationale": prediction.rationale,
                 "latency_ms": prediction.latency_ms,
                 "tokens_used": prediction.tokens_used,
+                # Richer prediction fields (model may omit when data
+                # is thin — clients should treat each as optional)
+                "key_factors": (prediction.metadata or {}).get("key_factors") or [],
+                "likely_scores": (prediction.metadata or {}).get("likely_scores") or [],
+                "total_goals": (prediction.metadata or {}).get("total_goals"),
+                "halves": (prediction.metadata or {}).get("halves"),
+                "top_scorers": (prediction.metadata or {}).get("top_scorers") or [],
             },
             "discussion": (prediction.metadata or {}).get("discussion"),
         }

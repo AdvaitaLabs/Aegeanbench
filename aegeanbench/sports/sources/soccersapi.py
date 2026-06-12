@@ -65,6 +65,38 @@ def _mock_player(player_id: str, name: str, fifa_code: str, position: str, **ext
     )
 
 
+def _player_from_squad_row(row: Dict) -> Player:
+    """
+    Map one /teams/?t=squad row to our Player dataclass.
+
+    Real row shape (verified 2026-06-12):
+        {"player": {"id":91319, "name":"Brian",
+                    "common_name":"Gutierrez, Brian",
+                    "firstname":"Brian", "lastname":"Gutierrez",
+                    "age":22, "weight":64, "height":178,
+                    "img":"...",
+                    "country":{"id":124, "name":"USA", "cc":"us"}},
+         "number":26, "captain":null,
+         "position":"M", "order":null}
+    """
+    p = row.get("player") or {}
+    country = p.get("country") or {}
+    pos_short = {
+        "G": "GK", "D": "DF", "M": "MF", "F": "FW",
+    }.get(str(row.get("position") or "").upper(), "MF")
+    try:
+        age = int(p.get("age")) if p.get("age") is not None else None
+    except (TypeError, ValueError):
+        age = None
+    return Player(
+        player_id=str(p.get("id") or ""),
+        name=p.get("common_name") or p.get("name") or "Unknown",
+        team_fifa_code=(country.get("cc") or "").upper()[:3] or "???",
+        position=pos_short,
+        age=age,
+    )
+
+
 def _mock_lineup(team_fifa_code: str) -> List[Player]:
     """Return 11 mock starters. Star players hard-coded for top sides."""
     stars = {
@@ -221,25 +253,127 @@ class SoccersAPIAdapter(SourceAdapter):
             )
         return out
 
+    def fetch_squad(
+        self, soccersapi_team_id: int, policy: Optional[FetchPolicy] = None
+    ) -> List[Player]:
+        """
+        Real national-team squad from SoccersAPI's t=squad endpoint.
+
+        Response shape (verified 2026-06-12):
+            {"data": {
+                "formation": null,
+                "squad": [
+                  {"player": {"id":91319,"name":"Brian",
+                              "common_name":"Gutierrez, Brian",
+                              "firstname":"Brian","lastname":"Gutierrez",
+                              "age":22,"weight":64,"height":178,
+                              "img":"...",
+                              "country":{"id":124,"name":"USA","cc":"us"}},
+                   "number":26,"captain":null,"position":"M","order":null},
+                  ...
+                ]
+            }}
+        """
+        policy = self._resolve_policy(policy)
+        if policy.mock or not self.api_key:
+            return _mock_lineup(str(soccersapi_team_id)[:3])
+
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/teams/",
+                params={
+                    "user": self.user, "token": self.api_key,
+                    "t": "squad", "id": soccersapi_team_id,
+                },
+                timeout=policy.timeout_seconds,
+            )
+            r.raise_for_status()
+            payload = r.json() or {}
+        except Exception as e:
+            logger.warning("soccersapi squad fetch (%s) failed: %s",
+                           soccersapi_team_id, e)
+            return _mock_lineup(str(soccersapi_team_id)[:3])
+
+        data = payload.get("data") or {}
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        squad = data.get("squad") or []
+        return [_player_from_squad_row(row) for row in squad if row]
+
+    def fetch_sidelined(
+        self, soccersapi_team_id: int, policy: Optional[FetchPolicy] = None
+    ) -> Dict[str, list]:
+        """
+        Real injuries + suspensions from t=sidelined.
+
+        Response shape:
+            {"data": {
+                "id": 234, "name": "Mexico",
+                "types": {
+                    "injuries":   [{"player":{"id","name"},"start","end","description"}, ...],
+                    "suspension": [...same shape...]
+                }
+            }}
+        Returns:
+            {"injuries": [...], "suspensions": [...]}    (empty lists OK)
+        """
+        policy = self._resolve_policy(policy)
+        if policy.mock or not self.api_key:
+            return {"injuries": [], "suspensions": []}
+
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/teams/",
+                params={
+                    "user": self.user, "token": self.api_key,
+                    "t": "sidelined", "id": soccersapi_team_id,
+                },
+                timeout=policy.timeout_seconds,
+            )
+            r.raise_for_status()
+            payload = r.json() or {}
+        except Exception as e:
+            logger.warning("soccersapi sidelined fetch (%s) failed: %s",
+                           soccersapi_team_id, e)
+            return {"injuries": [], "suspensions": []}
+
+        data = payload.get("data") or {}
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        types = data.get("types") or {}
+        return {
+            "injuries": list(types.get("injuries") or []),
+            "suspensions": list(types.get("suspension") or types.get("suspensions") or []),
+        }
+
     def _real_fetch_lineup(
         self, match_id: str, team_fifa_code: str, policy: FetchPolicy
     ) -> List[Player]:
         """
         Pull real starting XI from SoccersAPI.
 
-        Endpoint:
-            GET /v2.2/fixtures/?t=match_lineups&id=<fixture_id>
+        Endpoint: GET /v2.2/fixtures/?t=match_lineups&id=<fixture_id>
 
-        Response shape (verified live):
-            { "data": {
-                "localteam": { "id": .., "lineup": [
-                    {"player_id": "...", "player_name": "...",
-                     "team_id": .., "number": .., "position": "...",
-                     "type": "lineup"|"bench"},
-                    ...
-                ]},
-                "visitorteam": { ... }
-              } }
+        Response shape (verified 2026-06-12 against Korea vs Czech):
+            {"data": {
+                "home": {
+                    "formation": "4-1-2-3",
+                    "confirmed_formation": 1,
+                    "coach": {"id": 607, "name": "Aguirre, Javier"},
+                    "squad": [
+                        {"player": {"id":"...","name":"...",
+                                    "common_name":"Lastname, Firstname",
+                                    "country":{...}},
+                         "number":"1","captain":null,
+                         "position":"G","position_name":"Goalkeeper",
+                         "order":1},
+                        ...
+                    ]
+                },
+                "away": { ...same shape... }
+            }}
         """
         import requests
         try:
@@ -263,42 +397,48 @@ class SoccersAPIAdapter(SourceAdapter):
         if isinstance(data, list):
             data = data[0] if data else {}
 
-        # Figure out which side the caller asked for. We try the team's
-        # name / short_code first since that's what the gateway has;
-        # fall back to localteam when the heuristic fails.
         wanted = (team_fifa_code or "").upper()
-        local = data.get("localteam") or {}
-        visitor = data.get("visitorteam") or {}
+        home_block = data.get("home") or {}
+        away_block = data.get("away") or {}
 
-        def _team_matches(team_block: Dict, code: str) -> bool:
-            name = (team_block.get("name") or "").upper()
-            short = (team_block.get("short_code") or "").upper()
-            iso = (team_block.get("country_iso") or "").upper()
-            return code in {short, iso} or code in name
+        def _team_matches(block: Dict, code: str) -> bool:
+            # Lineup block doesn't carry team name directly — match via
+            # the first player's country code, which is the most reliable
+            # hint at the international level.
+            squad = block.get("squad") or []
+            for entry in squad[:3]:
+                country = ((entry.get("player") or {}).get("country") or {})
+                cc = (country.get("cc") or "").upper()
+                if code and (code == cc or code[:2] == cc):
+                    return True
+            return False
 
-        if _team_matches(local, wanted):
-            chosen = local
-        elif _team_matches(visitor, wanted):
-            chosen = visitor
+        if _team_matches(home_block, wanted):
+            chosen = home_block
+        elif _team_matches(away_block, wanted):
+            chosen = away_block
         else:
-            chosen = local  # best guess
+            chosen = home_block  # best guess
 
-        lineup_rows = chosen.get("lineup") or []
+        rows = chosen.get("squad") or []
         out: List[Player] = []
-        for row in lineup_rows:
-            # Skip bench rows when explicitly tagged
-            if str(row.get("type") or "").lower() == "bench":
-                continue
+        for entry in rows:
+            p = entry.get("player") or {}
+            country = (p.get("country") or {})
+            pos_short = {
+                "G": "GK", "D": "DF", "M": "MF", "F": "FW",
+            }.get(str(entry.get("position") or "").upper(), "MF")
+            try:
+                age = int(p.get("age")) if p.get("age") is not None else None
+            except (TypeError, ValueError):
+                age = None
             out.append(
                 Player(
-                    player_id=str(row.get("player_id") or row.get("id") or ""),
-                    name=row.get("player_name") or row.get("name") or "Unknown",
-                    team_fifa_code=team_fifa_code,
-                    position=str(row.get("position") or "?").upper()[:2],
-                    age=int(row["age"]) if str(row.get("age") or "").isdigit() else None,
-                    club=row.get("team") or row.get("club"),
-                    matches_played_for_team=int(row.get("appearances") or 0),
-                    goals_for_team=int(row.get("goals") or 0),
+                    player_id=str(p.get("id") or ""),
+                    name=p.get("common_name") or p.get("name") or "Unknown",
+                    team_fifa_code=(country.get("cc") or team_fifa_code or "?")[:3].upper(),
+                    position=pos_short,
+                    age=age,
                 )
             )
 

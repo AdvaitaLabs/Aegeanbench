@@ -30,6 +30,10 @@ _HIGH_PRIORITY_KINDS = {
     "goal", "own_goal", "penalty_scored", "penalty_missed",
     "red_card", "half_time", "full_time",
 }
+# Force a fresh consensus this often during a live match even if no
+# high-priority events landed. Picks up gradual momentum shifts that
+# don't fire a discrete trigger (sustained pressure, possession swing).
+_PERIODIC_REFRESH_SECONDS = 8 * 60
 
 
 class LiveEventPoller:
@@ -53,6 +57,10 @@ class LiveEventPoller:
         self._seen: Set[str] = set()  # event_ids we've already pushed
         self._disabled_reason: Optional[str] = None  # soft-disable flag
         self._poll_count = 0
+        # Track last forced refresh per match so we re-consense every
+        # PERIODIC_REFRESH seconds even on low-priority event streams
+        # (lots of shots / corners / offsides without a goal).
+        self._last_periodic_refresh: dict = {}
 
     def start(self) -> None:
         if self._task is not None:
@@ -106,6 +114,32 @@ class LiveEventPoller:
                 logger.warning("live tick failed for %s: %s", m.match_id, e)
 
     async def _handle_match(self, client, match) -> None:
+        # Periodic refresh: if the match is live and we haven't flushed
+        # the cache in PERIODIC_REFRESH_SECONDS, force a re-consensus
+        # so panel takes fresh state into account (momentum shifts,
+        # accumulated possession edge, etc.) even without a goal.
+        import time as _t
+        now_ts = _t.time()
+        last = self._last_periodic_refresh.get(match.match_id, 0.0)
+        if now_ts - last > _PERIODIC_REFRESH_SECONDS:
+            self._last_periodic_refresh[match.match_id] = now_ts
+            n = self.prediction_cache.invalidate_match(match.match_id)
+            if n > 0 or last > 0:
+                logger.info(
+                    "periodic refresh: flushed %d cache entries for %s",
+                    n, match.match_id,
+                )
+                await self.live_hub.publish(
+                    f"match:{match.match_id}",
+                    {
+                        "type": "consensus_invalidated",
+                        "match_id": match.match_id,
+                        "reason": "periodic_refresh",
+                        "detail": f"every {_PERIODIC_REFRESH_SECONDS // 60} min during live play",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+
         events = client.fetch_match_events(match.match_id)
         if events is None:
             return

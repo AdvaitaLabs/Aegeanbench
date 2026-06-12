@@ -112,15 +112,46 @@ predict:
        make the reason obvious without restating all your numbers.
     5. No bullet lists, no headings, no "As an analyst..." boilerplate.
 
-    OUTPUT FORMAT (strict JSON):
+    OUTPUT FORMAT (strict JSON — all fields required):
     {
       "p_home_win": 0.45,
       "p_draw": 0.28,
       "p_away_win": 0.27,
       "confidence": 0.65,
       "rationale": "Short chat-style message per the RATIONALE STYLE rules.",
-      "key_factors": ["factor 1", "factor 2", "factor 3"]
+      "key_factors": ["factor 1", "factor 2", "factor 3"],
+      "likely_scores": [
+        {"score": "1-1", "prob": 0.18},
+        {"score": "1-0", "prob": 0.14},
+        {"score": "2-1", "prob": 0.10}
+      ],
+      "total_goals": {
+        "expected": 2.3,
+        "over_2_5_prob": 0.42,
+        "under_2_5_prob": 0.58
+      },
+      "halves": {
+        "first_half_goals_expected": 0.9,
+        "second_half_goals_expected": 1.4,
+        "first_half_outcome_lean": "draw"
+      },
+      "top_scorers": [
+        {"name": "Son Heung-min", "team": "home", "prob": 0.32},
+        {"name": "Patrik Schick",  "team": "away", "prob": 0.22}
+      ]
     }
+
+    EXTRA FIELDS RULES:
+    - likely_scores: top 3 most probable exact scores, descending by prob.
+      Probabilities don't need to sum to 1 (tail is "other scores").
+    - total_goals.expected: your point estimate for total goals (float).
+    - halves.first_half_outcome_lean: one of "home", "draw", "away".
+    - top_scorers: 1-3 names you actually believe could score, from the
+      provided squad/lineup data. If no squad data is available, omit the
+      field entirely rather than inventing names.
+    - When data is too thin to give a confident extra-field value, you may
+      emit `null` for that field (or omit it). The 3 main probabilities,
+      confidence, rationale, key_factors are still required.
 
   # Chinese-language extension appended to system_en when lang=zh. The
   # JSON schema stays English so parsers work; only the `rationale`

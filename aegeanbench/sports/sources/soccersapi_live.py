@@ -104,11 +104,17 @@ class LiveMatchState:
 
     @property
     def is_finished(self) -> bool:
-        return self.status in ("ft", "after_extra_time", "after_penalties")
+        return self.status in (
+            "ft", "finished", "after_extra_time", "after_penalties",
+            "ended",
+        )
 
     @property
     def is_live(self) -> bool:
-        return self.status in ("in_play", "first_half", "second_half", "ht", "extra_time")
+        return self.status in (
+            "in_play", "inplay", "first_half", "second_half",
+            "ht", "extra_time", "half_time",
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -222,17 +228,19 @@ class SoccersAPILiveClient:
 
     def _real_live_matches(self, tournament: str) -> List[LiveMatchState]:
         """
-        Pull currently-live matches. Verified endpoint:
-            GET /v2.2/livescores/?t=live   (or t=inplay)
+        Pull currently-live matches.
+
+        Verified endpoint: GET /v2.2/livescores/?t=live
+        We drop the league_id filter intentionally — empirically the
+        filter returns 0 even when matches are clearly in play (verified
+        2026-06-12 with Korea vs Czech). Without the filter the call
+        returns all in-play matches; we filter to WC client-side by
+        checking row.league.id == 377.
         """
         import requests
 
         params = self._auth_params()
         params["t"] = "live"
-        if tournament == "world-cup":
-            league_id = os.getenv("SOCCERSAPI_WORLD_CUP_LEAGUE_ID", "377")
-            if league_id:
-                params["league_id"] = league_id
         url = f"{SOCCERSAPI_BASE}/livescores/"
         resp = requests.get(url, params=params, timeout=self.timeout)
         resp.raise_for_status()
@@ -240,7 +248,22 @@ class SoccersAPILiveClient:
         rows = data.get("data") or []
         if not isinstance(rows, list):
             rows = [rows]
-        return [self._parse_match_row(r) for r in rows if r]
+
+        wc_only = (tournament == "world-cup")
+        wc_league_id = int(os.getenv("SOCCERSAPI_WORLD_CUP_LEAGUE_ID", "377") or 377)
+        out: List[LiveMatchState] = []
+        for r in rows:
+            if not r:
+                continue
+            if wc_only:
+                lid = ((r.get("league") or {}).get("id"))
+                try:
+                    if lid is not None and int(lid) != wc_league_id:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            out.append(self._parse_match_row(r))
+        return out
 
     def _real_events(self, match_id: str) -> List[LiveEvent]:
         """
@@ -274,15 +297,55 @@ class SoccersAPILiveClient:
 
     @staticmethod
     def _parse_match_row(row: Dict[str, Any]) -> LiveMatchState:
-        home = row.get("home") or row.get("home_team") or {}
-        away = row.get("away") or row.get("away_team") or {}
-        score = row.get("score") or {}
+        """
+        Parse a row from /livescores. Real shape (verified 2026-06-12):
+            {
+              "id": 2517287,
+              "status": 4, "status_name": "Inplay",
+              "time": {"minute": 84, "datetime": "..."},
+              "teams": {
+                "home": {"id": 772, "name": "Korea Republic",
+                         "short_code": "KOR"},
+                "away": {"id": 798, "name": "Czechia",
+                         "short_code": "CZE"}
+              },
+              "scores": {"home_score": "2", "away_score": "1",
+                         "ht_score": "1-0", "ft_score": null}
+            }
+        """
+        teams = row.get("teams") or {}
+        home = teams.get("home") or row.get("home") or {}
+        away = teams.get("away") or row.get("away") or {}
+        scores = row.get("scores") or row.get("score") or {}
+        time_obj = row.get("time") or {}
+
+        try:
+            minute = int(time_obj.get("minute") or row.get("minute") or 0)
+        except (TypeError, ValueError):
+            minute = 0
+
+        def _g(side_key: str) -> int:
+            v = scores.get(f"{side_key}_score")
+            if v is None:
+                v = scores.get(side_key)
+            try:
+                return int(v) if v is not None else 0
+            except (TypeError, ValueError):
+                return 0
+
+        # status_name is the human label ("Inplay", "Finished", "HT", ...)
+        # — much more useful than the numeric "status" code.
+        status = (
+            str(row.get("status_name") or row.get("status") or "scheduled")
+            .lower().replace(" ", "_")
+        )
+
         return LiveMatchState(
             match_id=str(row.get("id") or row.get("match_id") or ""),
-            status=str(row.get("status") or "scheduled").lower(),
-            minute=int(row.get("minute") or 0),
-            home_goals=int(score.get("home", row.get("home_score", 0)) or 0),
-            away_goals=int(score.get("away", row.get("away_score", 0)) or 0),
+            status=status,
+            minute=minute,
+            home_goals=_g("home"),
+            away_goals=_g("away"),
             home_team=str(home.get("name") or home.get("short_code") or ""),
             away_team=str(away.get("name") or away.get("short_code") or ""),
         )

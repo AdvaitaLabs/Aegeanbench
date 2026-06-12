@@ -261,6 +261,14 @@ class AegeanPredictor(Predictor):
                     ),
                     "agent_types": self.agent_types,
                     "discussion": discussion.to_dict(),
+                    # Pass through the new richer JSON fields the prompt
+                    # asks for. They're optional — model may omit when
+                    # data is thin — so default to None / empty list.
+                    "key_factors": parsed.get("key_factors") or [],
+                    "likely_scores": parsed.get("likely_scores") or [],
+                    "total_goals": parsed.get("total_goals"),
+                    "halves": parsed.get("halves"),
+                    "top_scorers": parsed.get("top_scorers") or [],
                 },
             )
         finally:
