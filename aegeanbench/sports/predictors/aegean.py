@@ -109,7 +109,7 @@ class AegeanPredictor(Predictor):
         if self.mock:
             return self._mock_predict(ctx, prompts)
         try:
-            return self._real_predict(ctx, prompts)
+            return self._real_predict(ctx, prompts, lang=lang)
         except Exception as e:
             # Log with exc_info so we can see WHERE it failed: timeout
             # vs HTTP error vs schema mismatch all look different in the
@@ -125,7 +125,7 @@ class AegeanPredictor(Predictor):
     # ----------------------- real path -----------------------
 
     def _real_predict(
-        self, ctx: MatchContext, prompts: Dict[str, str]
+        self, ctx: MatchContext, prompts: Dict[str, str], lang: str = "en"
     ) -> Prediction:
         import requests
 
