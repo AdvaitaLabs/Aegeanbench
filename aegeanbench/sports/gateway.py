@@ -57,6 +57,14 @@ class MatchContext:  # noqa: D101
     #    "home": {"wins": 0, "draws": 1, "losses": 0, ...},
     #    "away": {"wins": 0, "draws": 1, "losses": 0, ...}}
     h2h_aggregate: Optional[Dict[str, Any]] = None
+    # In-play snapshot from soccersapi /livescores when the match is
+    # currently live or finished. None when the match hasn't started.
+    # Shape:
+    #   {"status": "inplay"|"ht"|"ft", "minute": 67,
+    #    "home_goals": 1, "away_goals": 0,
+    #    "recent_events": [{"minute": 38, "kind": "goal",
+    #                       "team": "MEX", "player": "Vela"}, ...]}
+    live_state: Optional[Dict[str, Any]] = None
 
     def summary(self) -> str:
         """Compact one-line summary for logs."""
@@ -172,6 +180,12 @@ class SportsDataGateway:
         except Exception as exc:  # noqa: BLE001
             logger.debug("h2h aggregate fetch failed: %s", exc)
 
+        # Live state: ONLY relevant if the match is in-play or just
+        # ended. soccersapi only returns it when the match is among
+        # the current livescores set, so this returns None during
+        # pre-match silence — that's the right behaviour.
+        live_state = self._fetch_live_state_for_match(match)
+
         ctx = MatchContext(
             match=match,
             home_history=home_history,
@@ -181,6 +195,7 @@ class SportsDataGateway:
             away_xg_profile=away_xg,
             weather=weather,
             h2h_aggregate=h2h_aggregate,
+            live_state=live_state,
         )
 
         return ctx
@@ -234,6 +249,93 @@ class SportsDataGateway:
             if city.lower() in v:
                 return city
         return None
+
+    def _fetch_live_state_for_match(self, match: Match) -> Optional[Dict[str, Any]]:
+        """
+        Pull current live score + recent events.
+
+        Resolution order:
+          1. soccersapi t=live + match_events (has full event stream
+             when it's caught up, but its `status` flag often lags 15-
+             30 min behind real life on the Soccer 100 plan).
+          2. football-data /matches/{fd_id} (no per-goal events, but
+             status / minute / score update much faster — verified
+             2026-06-15 reading IN_PLAY 57' / 2-1 while soccersapi
+             still said Notstarted on the same match).
+
+        Returns None when both sources have nothing (truly pre-match).
+        """
+        # ---- 1. soccersapi primary ----
+        sa_state = self._fetch_live_state_soccersapi(match)
+        if sa_state is not None:
+            return sa_state
+
+        # ---- 2. football-data fallback ----
+        try:
+            kickoff_iso = (match.kickoff_at.date().isoformat()
+                           if match.kickoff_at else None)
+            fd_match_id = self.football_data.resolve_match_id(
+                match.home_team.name or match.home_team.fifa_code,
+                match.away_team.name or match.away_team.fifa_code,
+                date_iso=kickoff_iso,
+            )
+            if fd_match_id is None:
+                return None
+            fd_state = self.football_data.fetch_live_state(fd_match_id)
+            if fd_state is None:
+                return None
+            # Only surface as "live state" when the match is actually
+            # in-play or finished — scheduled matches are not what
+            # we want to inject into the prompt.
+            if fd_state.get("status") in ("inplay", "ht", "ft"):
+                logger.info(
+                    "live state for %s sourced from football-data (sa lag)",
+                    match.match_id,
+                )
+                return fd_state
+            return None
+        except Exception as e:
+            logger.warning(
+                "football-data live state fallback failed for %s: %s",
+                match.match_id, e,
+            )
+            return None
+
+    def _fetch_live_state_soccersapi(self, match: Match) -> Optional[Dict[str, Any]]:
+        """Primary live-state path: soccersapi t=live + match_events."""
+        try:
+            from aegeanbench.sports.sources.soccersapi_live import SoccersAPILiveClient
+            client = SoccersAPILiveClient()
+            live_state = None
+            for m in client.fetch_live_matches():
+                if str(m.match_id) == str(match.match_id):
+                    live_state = m
+                    break
+            if live_state is None:
+                return None
+
+            events = client.fetch_match_events(match.match_id) or []
+            recent_events = []
+            for ev in events[-8:]:
+                recent_events.append({
+                    "minute": ev.minute,
+                    "kind": ev.kind.value,
+                    "team": ev.team_fifa_code,
+                    "player": ev.player_name,
+                    "detail": ev.detail,
+                })
+
+            return {
+                "status": live_state.status,
+                "minute": live_state.minute,
+                "home_goals": live_state.home_goals,
+                "away_goals": live_state.away_goals,
+                "recent_events": recent_events,
+                "source": "soccersapi",
+            }
+        except Exception as e:
+            logger.warning("soccersapi live state failed for %s: %s", match.match_id, e)
+            return None
 
     def _fetch_weather_for_match(self, match: Match) -> Optional[Dict[str, Any]]:
         """

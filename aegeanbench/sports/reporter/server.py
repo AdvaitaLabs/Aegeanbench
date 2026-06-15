@@ -479,7 +479,12 @@ def create_app(
         chat_texts = [m.text for m in (body.chat_messages or [])]
         lang = explicit_lang or detect_from_signals(None, chat_texts) or "en"
 
-        # Cache check before paying the 20-30s consensus cost
+        # Cache check before paying the 20-30s consensus cost.
+        # IMPORTANT: skip the cache entirely for in-play matches. A 60s
+        # stale prediction is fine for a pre-match panel but disastrous
+        # for live — the score, minute, and recent events all change
+        # within the cache window, and product saw "1-0 but consensus
+        # still picks the losing side" precisely because of this.
         cache = app.state.prediction_cache
         cache_key = cache.make_key(
             match_id=body.match_id,
@@ -487,7 +492,8 @@ def create_app(
             lang=lang,
             chat_messages=body.chat_messages,
         )
-        cached_payload = cache.get(cache_key)
+        is_in_play = bool(getattr(ctx, "live_state", None))
+        cached_payload = None if is_in_play else cache.get(cache_key)
         if cached_payload is not None:
             # Echo back with cache flag so the client can show "cached".
             cached = dict(cached_payload)
@@ -544,9 +550,10 @@ def create_app(
             },
             "discussion": (prediction.metadata or {}).get("discussion"),
         }
-        # Only cache real predictions. Mock / failed responses bypass
-        # the cache so the next attempt re-runs against fresh state.
-        if not is_mock:
+        # Only cache real predictions, AND never cache in-play matches
+        # (their state changes too fast). Mock / failed responses also
+        # bypass the cache so the next attempt re-runs cleanly.
+        if not is_mock and not is_in_play:
             cache.put(cache_key, match_id=body.match_id, payload=payload)
         return payload
 

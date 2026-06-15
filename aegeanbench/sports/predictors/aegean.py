@@ -244,6 +244,16 @@ class AegeanPredictor(Predictor):
                    + int(result.get("tokens_completion", 0))
             )
 
+            # Append a structured summary block to the rationale so a
+            # front-end that doesn't yet render likely_scores / halves /
+            # top_scorers separately still surfaces them inline.
+            base_rationale = str(parsed.get("rationale", ""))
+            structured_suffix = _format_structured_summary(parsed, lang=lang)
+            rationale_with_summary = (
+                base_rationale.rstrip() + "\n\n" + structured_suffix
+                if structured_suffix else base_rationale
+            )
+
             return Prediction(
                 match_id=ctx.match.match_id,
                 runner_id=self.runner_id,
@@ -251,7 +261,7 @@ class AegeanPredictor(Predictor):
                 p_draw=p_draw,
                 p_away_win=p_away,
                 confidence=float(parsed.get("confidence", final.get("confidence", 0.6))),
-                rationale=str(parsed.get("rationale", "")),
+                rationale=rationale_with_summary,
                 latency_ms=latency_ms,
                 tokens_used=tokens_total,
                 metadata={
@@ -425,3 +435,94 @@ class AegeanPredictor(Predictor):
                 "discussion": discussion.to_dict(),
             },
         )
+
+
+
+def _format_structured_summary(parsed: Dict[str, Any], lang: str = "en") -> str:
+    """
+    Build a human-readable text block that summarises the extra
+    prediction fields (likely_scores / total_goals / halves / top_scorers).
+
+    Appended to the consensus rationale so a front-end that hasn't yet
+    added dedicated UI for these fields still shows them inline. Pure
+    ASCII + minimal formatting so it renders cleanly inside a chat
+    bubble.
+
+    Returns "" when the parsed payload has none of these optional
+    fields — avoids dangling "---" separators below the rationale.
+    """
+    likely = parsed.get("likely_scores") or []
+    totals = parsed.get("total_goals")
+    halves = parsed.get("halves")
+    scorers = parsed.get("top_scorers") or []
+
+    if not any([likely, totals, halves, scorers]):
+        return ""
+
+    is_zh = lang == "zh"
+    lines: List[str] = []
+    lines.append("———")
+
+    if likely:
+        head = "比分预测：" if is_zh else "Likely scores:"
+        parts = []
+        for it in likely[:3]:
+            sc = str(it.get("score", "?"))
+            try:
+                prob = float(it.get("prob") or 0.0)
+            except (TypeError, ValueError):
+                prob = 0.0
+            parts.append(f"{sc} ({int(round(prob * 100))}%)")
+        lines.append(head + " " + " · ".join(parts))
+
+    if isinstance(totals, dict):
+        try:
+            expected = float(totals.get("expected") or 0.0)
+            over = float(totals.get("over_2_5_prob") or 0.0)
+            under = float(totals.get("under_2_5_prob") or 0.0)
+        except (TypeError, ValueError):
+            expected = over = under = 0.0
+        if is_zh:
+            lines.append(
+                f"总进球：预期 {expected:.1f} · 大球 2.5 {int(round(over*100))}% · 小球 2.5 {int(round(under*100))}%"
+            )
+        else:
+            lines.append(
+                f"Total goals: {expected:.1f} expected · Over 2.5 {int(round(over*100))}% · Under 2.5 {int(round(under*100))}%"
+            )
+
+    if isinstance(halves, dict):
+        try:
+            fh = float(halves.get("first_half_goals_expected") or 0.0)
+            sh = float(halves.get("second_half_goals_expected") or 0.0)
+        except (TypeError, ValueError):
+            fh = sh = 0.0
+        lean = str(halves.get("first_half_outcome_lean") or "").lower()
+        lean_zh = {"home": "主胜倾向", "away": "客胜倾向", "draw": "平局倾向"}.get(lean, "")
+        lean_en = lean.capitalize() if lean else ""
+        if is_zh:
+            tail = f" · 上半场{lean_zh}" if lean_zh else ""
+            lines.append(f"上下半场：上半 {fh:.1f} 球 · 下半 {sh:.1f} 球{tail}")
+        else:
+            tail = f" · 1st half {lean_en} lean" if lean_en else ""
+            lines.append(f"Halves: 1st half {fh:.1f} goals · 2nd half {sh:.1f} goals{tail}")
+
+    if scorers:
+        head = "可能进球者：" if is_zh else "Top scorers:"
+        parts = []
+        for s in scorers[:3]:
+            name = s.get("name") or "?"
+            try:
+                prob = float(s.get("prob") or 0.0)
+            except (TypeError, ValueError):
+                prob = 0.0
+            team = (s.get("team") or "").lower()
+            side_tag = ""
+            if team == "home":
+                side_tag = "(主)" if is_zh else "(home)"
+            elif team == "away":
+                side_tag = "(客)" if is_zh else "(away)"
+            parts.append(f"{name}{side_tag} {int(round(prob * 100))}%")
+        lines.append(head + " " + " · ".join(parts))
+
+    return "\n".join(lines)

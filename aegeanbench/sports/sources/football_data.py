@@ -505,6 +505,77 @@ class FootballDataAdapter(SourceAdapter):
                 return hit
         return idx.get((h, a))
 
+    # ---------- live state (used as soccersapi fallback) ----------
+
+    def fetch_live_state(
+        self,
+        fd_match_id: int,
+        policy: Optional[FetchPolicy] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Pull current score / minute / status for a single match.
+
+        Returns shape compatible with the LIVE STATE prompt block:
+            {"status": "inplay"|"ht"|"ft"|"scheduled",
+             "minute": 57,
+             "home_goals": 2, "away_goals": 1,
+             "recent_events": []}        (free tier rarely populates this)
+
+        Returns None when the match isn't found.
+        """
+        policy = self._resolve_policy(policy)
+        if policy.mock:
+            return None
+        import requests
+        try:
+            r = requests.get(
+                f"{API_BASE}/matches/{fd_match_id}",
+                headers=self._headers(),
+                timeout=policy.timeout_seconds,
+            )
+            r.raise_for_status()
+            data = r.json() or {}
+        except Exception as e:
+            logger.warning("football_data live state fetch (%s) failed: %s", fd_match_id, e)
+            return None
+
+        status_raw = (data.get("status") or "").upper()
+        # FD statuses: SCHEDULED, TIMED, IN_PLAY, PAUSED (HT), FINISHED,
+        # SUSPENDED, POSTPONED, CANCELLED, AWARDED. Map to ours.
+        status_map = {
+            "IN_PLAY": "inplay",
+            "PAUSED": "ht",
+            "FINISHED": "ft",
+            "AWARDED": "ft",
+            "SCHEDULED": "scheduled",
+            "TIMED": "scheduled",
+        }
+        status = status_map.get(status_raw, status_raw.lower() or "scheduled")
+
+        full_time = (data.get("score") or {}).get("fullTime") or {}
+        try:
+            home_goals = int(full_time.get("home") or 0)
+            away_goals = int(full_time.get("away") or 0)
+        except (TypeError, ValueError):
+            home_goals = away_goals = 0
+
+        try:
+            minute = int(data.get("minute") or 0)
+        except (TypeError, ValueError):
+            minute = 0
+
+        # FD's free tier returns goals/bookings as integers (counts) not
+        # arrays — we can't reconstruct events from this. We populate the
+        # field as empty so callers know.
+        return {
+            "status": status,
+            "minute": minute,
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+            "recent_events": [],
+            "source": "football_data",
+        }
+
     def fetch_h2h_aggregate(
         self,
         fd_match_id: int,

@@ -219,6 +219,22 @@ def build_user_prompt(ctx: MatchContext, focus: Optional[str] = None) -> str:
     parts.append(_format_recent_form(ctx.away_history))
     parts.append("")
 
+    # ===== LIVE STATE (most critical when present) =====
+    # Render BEFORE pre-match data so the model anchors on what's
+    # actually happening, not historical xG. When a match is 1-0 at
+    # 47', telling the model that AFTER showing pre-match favourites
+    # leads to the wrong prediction.
+    live = getattr(ctx, "live_state", None) or {}
+    if live:
+        parts.insert(0, "")  # blank line for readability
+        parts.insert(0, _render_live_state_block(
+            home_code=home.fifa_code,
+            away_code=away.fifa_code,
+            home_name=home.name or home.fifa_code,
+            away_name=away.name or away.fifa_code,
+            live=live,
+        ))
+
     parts.append("## Head-to-Head (last 5)")
     parts.append(_format_h2h(ctx.h2h))
     parts.append("")
@@ -308,6 +324,66 @@ def _focus_hint(focus: str) -> str:
         ),
     }
     return hints.get(focus, f"Focus on the '{focus}' lens of analysis.")
+
+
+def _render_live_state_block(
+    home_code: str,
+    away_code: str,
+    home_name: str,
+    away_name: str,
+    live: Dict,
+) -> str:
+    """
+    Render the LIVE STATE block. Sits at the top of the user prompt so
+    the model anchors on what's happening NOW, not pre-match form.
+    """
+    status = (live.get("status") or "").lower()
+    minute = live.get("minute") or 0
+    hg = int(live.get("home_goals") or 0)
+    ag = int(live.get("away_goals") or 0)
+    diff = hg - ag
+
+    headline = (
+        f"# ⚡ LIVE STATE — DO NOT IGNORE\n"
+        f"Status: {status.upper()} · minute {minute}'\n"
+        f"Current score: {home_name} {hg}-{ag} {away_name}\n"
+    )
+
+    if status == "ft" or status == "finished":
+        # Match is over, prediction is moot but still useful for post-game
+        lean = (
+            f"FT — {home_name} won {hg}-{ag}" if diff > 0
+            else f"FT — {away_name} won {ag}-{hg}" if diff < 0
+            else f"FT — draw {hg}-{ag}"
+        )
+        headline += f"\n{lean}.\n"
+    elif diff != 0:
+        leading = home_name if diff > 0 else away_name
+        trailing = away_name if diff > 0 else home_name
+        time_remaining = max(0, 90 - int(minute or 0))
+        headline += (
+            f"\n{leading} is LEADING by {abs(diff)}. {trailing} needs to "
+            f"come from behind with ~{time_remaining}' remaining.\n"
+            f"Your probability MUST factor this in: the trailing side's "
+            f"probability of winning the match should drop sharply once "
+            f"down a goal, especially deep in the second half.\n"
+        )
+    else:
+        headline += (
+            f"\nStill tied. Match is in the balance with "
+            f"{max(0, 90 - int(minute or 0))}' remaining.\n"
+        )
+
+    events = live.get("recent_events") or []
+    if events:
+        headline += "\nRecent events:\n"
+        for ev in events[-6:]:
+            headline += (
+                f"  {ev.get('minute', '?')}' {ev.get('kind', '?')}"
+                f" · {ev.get('team') or '?'}"
+                f"{' · ' + ev['player'] if ev.get('player') else ''}\n"
+            )
+    return headline
 
 
 def build_full_prompt(

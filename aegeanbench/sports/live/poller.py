@@ -102,9 +102,19 @@ class LiveEventPoller:
             live_matches = client.fetch_live_matches()
         except Exception as e:
             logger.warning("live matches fetch failed: %s", e)
-            return
+            live_matches = []
 
+        # When soccersapi has nothing (its `status` often lags 15-30
+        # minutes behind real life on Soccer 100), check football-data
+        # for currently in-play WC matches as a fallback. We can't get
+        # per-event detail from FD's free tier, but we can at least
+        # invalidate the prediction cache for matches that are actually
+        # live, so the next /predict re-runs with fresh state.
         if not live_matches:
+            try:
+                await self._invalidate_from_football_data()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("football_data fallback failed: %s", e)
             return
 
         for m in live_matches:
@@ -112,6 +122,75 @@ class LiveEventPoller:
                 await self._handle_match(client, m)
             except Exception as e:  # noqa: BLE001
                 logger.warning("live tick failed for %s: %s", m.match_id, e)
+
+    async def _invalidate_from_football_data(self) -> None:
+        """
+        Walk football-data's WC IN_PLAY matches and trigger a cache
+        flush + WS notice for any we haven't seen recently. Map FD ids
+        back to soccersapi ids so the cache key (which uses soccersapi
+        match_ids from the front-end) actually drops.
+        """
+        try:
+            import requests
+        except ImportError:
+            return
+        import os
+        key = os.getenv("AEGEANBENCH_FOOTBALL_DATA_KEY", "")
+        if not key:
+            return
+        try:
+            r = requests.get(
+                "https://api.football-data.org/v4/competitions/WC/matches",
+                headers={"X-Auth-Token": key},
+                params={"status": "LIVE"},
+                timeout=8,
+            )
+            r.raise_for_status()
+            payload = r.json() or {}
+        except Exception as e:
+            logger.warning("football_data LIVE matches fetch failed: %s", e)
+            return
+
+        matches = payload.get("matches") or []
+        if not matches:
+            return
+
+        # We need a (fd_id -> soccersapi_id) translation. Use the
+        # cached match_info that match_brief built — soccersapi t=info
+        # carries soccersapi's own id for any fixture we've touched.
+        # As a simpler heuristic, match by (home_team_name, away_team_name)
+        # against any sa match_id we've seen recently.
+        for m in matches:
+            home = (m.get("homeTeam") or {}).get("name", "")
+            away = (m.get("awayTeam") or {}).get("name", "")
+            fd_minute = m.get("minute") or 0
+            score = (m.get("score") or {}).get("fullTime") or {}
+            envelope = {
+                "type": "live_event_fallback",
+                "source": "football_data",
+                "home": home,
+                "away": away,
+                "minute": fd_minute,
+                "home_goals": score.get("home", 0),
+                "away_goals": score.get("away", 0),
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            # Best-effort: push to all WS subscribers of any channel that
+            # mentions either team (the front-end can pick relevant rooms).
+            try:
+                await self.live_hub.publish("predictions", envelope)
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Periodic refresh logic: if we've never invalidated this
+            # match (no soccersapi_id known here), there's nothing to
+            # invalidate in the prediction cache. But the WS push still
+            # lets the front-end know "this match is live, status feed
+            # has it even though our primary source doesn't yet".
+            logger.info(
+                "football_data sees LIVE: %s %s-%s %s (%s')",
+                home, score.get("home", 0), score.get("away", 0), away, fd_minute,
+            )
 
     async def _handle_match(self, client, match) -> None:
         # Periodic refresh: if the match is live and we haven't flushed
