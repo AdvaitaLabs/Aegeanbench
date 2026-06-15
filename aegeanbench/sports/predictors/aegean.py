@@ -244,12 +244,16 @@ class AegeanPredictor(Predictor):
                    + int(result.get("tokens_completion", 0))
             )
 
+            # Auto-fill top_scorers when LLM returned [] but we have a
+            # real squad — write back into `parsed` so the structured
+            # rationale suffix renders these names too. This keeps the
+            # response metadata and the inline summary in sync.
+            if not parsed.get("top_scorers"):
+                parsed["top_scorers"] = _auto_top_scorers(ctx, p_home, p_away)
+
             # Append a structured summary block to the rationale so a
             # front-end that doesn't yet render likely_scores / halves /
             # top_scorers separately still surfaces them inline.
-            # Pass live_state so the formatter can override halves with
-            # ACTUAL HT/2H goal counts (model gave 0/0 for an in-play
-            # 3-1 game because it interpreted "expected" as "remaining").
             base_rationale = str(parsed.get("rationale", ""))
             structured_suffix = _format_structured_summary(
                 parsed, lang=lang,
@@ -285,6 +289,7 @@ class AegeanPredictor(Predictor):
                     "likely_scores": parsed.get("likely_scores") or [],
                     "total_goals": parsed.get("total_goals"),
                     "halves": parsed.get("halves"),
+                    # Already auto-filled above when LLM returned []
                     "top_scorers": parsed.get("top_scorers") or [],
                 },
             )
@@ -579,3 +584,71 @@ def _format_structured_summary(
         lines.append(head + " " + " · ".join(parts))
 
     return "\n".join(lines)
+
+
+def _auto_top_scorers(ctx, p_home: float, p_away: float) -> List[Dict[str, Any]]:
+    """
+    Fallback when the LLM returned an empty `top_scorers` list but we
+    DO have real squad names from football-data / soccersapi.
+
+    Strategy:
+        1. Take the squads from match.home_lineup / match.away_lineup
+        2. Filter to forwards (FW) and attacking midfielders (MF)
+        3. Pick top 2 from the team more likely to win, 1 from the other
+        4. Assign decreasing probabilities (rough heuristic, not real xG)
+
+    Returns [] only when neither side has real player names — in that
+    case the prompt's "no squad data" rule legitimately kicks in.
+    """
+    home_pool = _filter_attackers(getattr(ctx.match, "home_lineup", None))
+    away_pool = _filter_attackers(getattr(ctx.match, "away_lineup", None))
+    if not home_pool and not away_pool:
+        return []
+
+    # Lean: more picks from the team with higher win probability.
+    home_picks = 2 if p_home >= p_away else 1
+    away_picks = 3 - home_picks
+    base_prob = 0.30 if max(p_home, p_away) > 0.6 else 0.22
+
+    out: List[Dict[str, Any]] = []
+    decay = 0.0
+    for p in home_pool[:home_picks]:
+        out.append({
+            "name": p.name,
+            "team": "home",
+            "prob": round(max(0.05, base_prob - decay), 2),
+        })
+        decay += 0.10
+    decay = 0.0
+    for p in away_pool[:away_picks]:
+        # Away pool gets a lower starting prob if home is favoured
+        away_base = base_prob - 0.10 if p_home > p_away else base_prob
+        out.append({
+            "name": p.name,
+            "team": "away",
+            "prob": round(max(0.04, away_base - decay), 2),
+        })
+        decay += 0.08
+    return out
+
+
+def _filter_attackers(lineup) -> List:
+    """Prefer FW > attacking MF > the rest, skip placeholders."""
+    if not lineup:
+        return []
+    forwards: List = []
+    midfielders: List = []
+    others: List = []
+    for p in lineup:
+        name = (getattr(p, "name", "") or "").strip()
+        # Skip mock placeholders like "Player 1" / "REP Player 2"
+        if not name or "Player " in name or name.lower().startswith("unknown"):
+            continue
+        pos = (getattr(p, "position", "") or "").upper()
+        if pos == "FW":
+            forwards.append(p)
+        elif pos == "MF":
+            midfielders.append(p)
+        else:
+            others.append(p)
+    return forwards + midfielders + others
