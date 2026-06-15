@@ -247,8 +247,14 @@ class AegeanPredictor(Predictor):
             # Append a structured summary block to the rationale so a
             # front-end that doesn't yet render likely_scores / halves /
             # top_scorers separately still surfaces them inline.
+            # Pass live_state so the formatter can override halves with
+            # ACTUAL HT/2H goal counts (model gave 0/0 for an in-play
+            # 3-1 game because it interpreted "expected" as "remaining").
             base_rationale = str(parsed.get("rationale", ""))
-            structured_suffix = _format_structured_summary(parsed, lang=lang)
+            structured_suffix = _format_structured_summary(
+                parsed, lang=lang,
+                live_state=getattr(ctx, "live_state", None),
+            )
             rationale_with_summary = (
                 base_rationale.rstrip() + "\n\n" + structured_suffix
                 if structured_suffix else base_rationale
@@ -438,7 +444,11 @@ class AegeanPredictor(Predictor):
 
 
 
-def _format_structured_summary(parsed: Dict[str, Any], lang: str = "en") -> str:
+def _format_structured_summary(
+    parsed: Dict[str, Any],
+    lang: str = "en",
+    live_state: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Build a human-readable text block that summarises the extra
     prediction fields (likely_scores / total_goals / halves / top_scorers).
@@ -491,7 +501,50 @@ def _format_structured_summary(parsed: Dict[str, Any], lang: str = "en") -> str:
                 f"Total goals: {expected:.1f} expected · Over 2.5 {int(round(over*100))}% · Under 2.5 {int(round(under*100))}%"
             )
 
-    if isinstance(halves, dict):
+    # For LIVE / FINISHED matches, override the model's halves
+    # estimate with the ACTUAL HT and current scores from the live
+    # feed. Model tends to interpret "second_half_goals_expected"
+    # as "remaining goals from now", which gives 0 / 0 in a 78' 3-1
+    # game. We have the real numbers — use them.
+    if isinstance(live_state, dict) and live_state.get("status") in (
+        "inplay", "ht", "ft"
+    ):
+        try:
+            hg = int(live_state.get("home_goals") or 0)
+            ag = int(live_state.get("away_goals") or 0)
+            ht_h = int(live_state.get("ht_home_goals") or 0)
+            ht_a = int(live_state.get("ht_away_goals") or 0)
+            minute = int(live_state.get("minute") or 0)
+        except (TypeError, ValueError):
+            hg = ag = ht_h = ht_a = minute = 0
+
+        first_half_goals = ht_h + ht_a
+        second_half_goals = max(0, (hg + ag) - first_half_goals)
+        # 1st half lean from actual HT result
+        if ht_h > ht_a:
+            lean_zh, lean_en = "主胜领先", "Home led"
+        elif ht_h < ht_a:
+            lean_zh, lean_en = "客胜领先", "Away led"
+        else:
+            lean_zh, lean_en = "平局", "tied"
+
+        status = live_state.get("status")
+        suffix_zh = "已完成" if status == "ft" else f"截至 {minute}'"
+        suffix_en = "final" if status == "ft" else f"as of {minute}'"
+
+        if is_zh:
+            lines.append(
+                f"上下半场（{suffix_zh}）：上半 {first_half_goals} 球 ({lean_zh})"
+                f" · 下半 {second_half_goals} 球"
+            )
+        else:
+            lines.append(
+                f"Halves ({suffix_en}): 1st half {first_half_goals} goals ({lean_en})"
+                f" · 2nd half {second_half_goals} goals"
+            )
+
+    elif isinstance(halves, dict):
+        # Pre-match: trust the model's expected-goals estimate
         try:
             fh = float(halves.get("first_half_goals_expected") or 0.0)
             sh = float(halves.get("second_half_goals_expected") or 0.0)
@@ -502,10 +555,10 @@ def _format_structured_summary(parsed: Dict[str, Any], lang: str = "en") -> str:
         lean_en = lean.capitalize() if lean else ""
         if is_zh:
             tail = f" · 上半场{lean_zh}" if lean_zh else ""
-            lines.append(f"上下半场：上半 {fh:.1f} 球 · 下半 {sh:.1f} 球{tail}")
+            lines.append(f"上下半场（预测）：上半 {fh:.1f} 球 · 下半 {sh:.1f} 球{tail}")
         else:
             tail = f" · 1st half {lean_en} lean" if lean_en else ""
-            lines.append(f"Halves: 1st half {fh:.1f} goals · 2nd half {sh:.1f} goals{tail}")
+            lines.append(f"Halves (pre-match): 1st half {fh:.1f} goals · 2nd half {sh:.1f} goals{tail}")
 
     if scorers:
         head = "可能进球者：" if is_zh else "Top scorers:"

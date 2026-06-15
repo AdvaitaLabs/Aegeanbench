@@ -552,12 +552,19 @@ class FootballDataAdapter(SourceAdapter):
         }
         status = status_map.get(status_raw, status_raw.lower() or "scheduled")
 
-        full_time = (data.get("score") or {}).get("fullTime") or {}
+        score = data.get("score") or {}
+        full_time = score.get("fullTime") or {}
+        half_time = score.get("halfTime") or {}
         try:
             home_goals = int(full_time.get("home") or 0)
             away_goals = int(full_time.get("away") or 0)
         except (TypeError, ValueError):
             home_goals = away_goals = 0
+        try:
+            ht_home = int(half_time.get("home") or 0)
+            ht_away = int(half_time.get("away") or 0)
+        except (TypeError, ValueError):
+            ht_home = ht_away = 0
 
         try:
             minute = int(data.get("minute") or 0)
@@ -572,6 +579,8 @@ class FootballDataAdapter(SourceAdapter):
             "minute": minute,
             "home_goals": home_goals,
             "away_goals": away_goals,
+            "ht_home_goals": ht_home,
+            "ht_away_goals": ht_away,
             "recent_events": [],
             "source": "football_data",
         }

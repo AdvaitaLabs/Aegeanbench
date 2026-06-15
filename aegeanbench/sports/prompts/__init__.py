@@ -349,6 +349,22 @@ def _render_live_state_block(
         f"Current score: {home_name} {hg}-{ag} {away_name}\n"
     )
 
+    # Half-time score (when available) lets the model reason about
+    # 1st-half vs 2nd-half goal distribution accurately.
+    ht_h = live.get("ht_home_goals")
+    ht_a = live.get("ht_away_goals")
+    if ht_h is not None and ht_a is not None and (ht_h or ht_a):
+        try:
+            ht_h_i = int(ht_h)
+            ht_a_i = int(ht_a)
+            headline += (
+                f"Half-time score: {home_name} {ht_h_i}-{ht_a_i} {away_name}"
+                f" (1st-half goals: {ht_h_i + ht_a_i};"
+                f" 2nd-half goals so far: {max(0, (hg + ag) - (ht_h_i + ht_a_i))})\n"
+            )
+        except (TypeError, ValueError):
+            pass
+
     if status == "ft" or status == "finished":
         # Match is over, prediction is moot but still useful for post-game
         lean = (
