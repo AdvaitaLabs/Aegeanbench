@@ -251,6 +251,14 @@ class AegeanPredictor(Predictor):
             if not parsed.get("top_scorers"):
                 parsed["top_scorers"] = _auto_top_scorers(ctx, p_home, p_away)
 
+            # Normalize total_goals over+under so they sum to 1.0. LLMs
+            # occasionally emit one side only (or both that don't sum)
+            # — the front-end card would then show 48% over / 0% under
+            # which reads as a contradiction.
+            tg = parsed.get("total_goals")
+            if isinstance(tg, dict):
+                _normalize_total_goals_inplace(tg)
+
             # Append a structured summary block to the rationale so a
             # front-end that doesn't yet render likely_scores / halves /
             # top_scorers separately still surfaces them inline.
@@ -493,13 +501,32 @@ def _format_structured_summary(
     if isinstance(totals, dict):
         try:
             expected = float(totals.get("expected") or 0.0)
-            over = float(totals.get("over_2_5_prob") or 0.0)
-            under = float(totals.get("under_2_5_prob") or 0.0)
+            over_raw = totals.get("over_2_5_prob")
+            under_raw = totals.get("under_2_5_prob")
+            over = float(over_raw) if over_raw is not None else None
+            under = float(under_raw) if under_raw is not None else None
         except (TypeError, ValueError):
-            expected = over = under = 0.0
+            expected = 0.0
+            over = under = None
+
+        # Enforce over + under = 1.0. The LLM sometimes only emits one
+        # of the two (or both with bad sum); derive the missing side or
+        # rescale to total 1.0 so the display always makes sense.
+        if over is None and under is None:
+            over = 0.5
+            under = 0.5
+        elif over is None:
+            over = max(0.0, 1.0 - under)
+        elif under is None:
+            under = max(0.0, 1.0 - over)
+        else:
+            s = over + under
+            if s > 0 and abs(s - 1.0) > 0.05:
+                over, under = over / s, under / s
+
         if is_zh:
             lines.append(
-                f"总进球：预期 {expected:.1f} · 大球 2.5 {int(round(over*100))}% · 小球 2.5 {int(round(under*100))}%"
+                f"总进球：预期 {expected:.1f} 球 · 大球 2.5 {int(round(over*100))}% · 小球 2.5 {int(round(under*100))}%"
             )
         else:
             lines.append(
@@ -549,21 +576,37 @@ def _format_structured_summary(
             )
 
     elif isinstance(halves, dict):
-        # Pre-match: trust the model's expected-goals estimate
+        # Pre-match: trust the model's expected-goals estimate.
+        # Render fractional values as "约 X 球" ranges (rounding to a
+        # likely range like "0-1" / "1-2") instead of e.g. "1.5 球"
+        # which reads as half a goal — confusing for end users.
         try:
             fh = float(halves.get("first_half_goals_expected") or 0.0)
             sh = float(halves.get("second_half_goals_expected") or 0.0)
         except (TypeError, ValueError):
             fh = sh = 0.0
+
+        def _range(v: float) -> str:
+            # 0.7 -> "0-1", 1.1 -> "1", 1.5 -> "1-2", 2.3 -> "2"
+            lo = int(v)
+            hi = int(v + 0.5)
+            if hi == lo:
+                return str(lo)
+            return f"{lo}-{hi}"
+
         lean = str(halves.get("first_half_outcome_lean") or "").lower()
         lean_zh = {"home": "主胜倾向", "away": "客胜倾向", "draw": "平局倾向"}.get(lean, "")
         lean_en = lean.capitalize() if lean else ""
         if is_zh:
             tail = f" · 上半场{lean_zh}" if lean_zh else ""
-            lines.append(f"上下半场（预测）：上半 {fh:.1f} 球 · 下半 {sh:.1f} 球{tail}")
+            lines.append(
+                f"上下半场（预测）：上半约 {_range(fh)} 球 · 下半约 {_range(sh)} 球{tail}"
+            )
         else:
             tail = f" · 1st half {lean_en} lean" if lean_en else ""
-            lines.append(f"Halves (pre-match): 1st half {fh:.1f} goals · 2nd half {sh:.1f} goals{tail}")
+            lines.append(
+                f"Halves (pre-match): 1st half ~{_range(fh)} goals · 2nd half ~{_range(sh)} goals{tail}"
+            )
 
     if scorers:
         head = "可能进球者：" if is_zh else "Top scorers:"
@@ -652,3 +695,36 @@ def _filter_attackers(lineup) -> List:
         else:
             others.append(p)
     return forwards + midfielders + others
+
+
+def _normalize_total_goals_inplace(tg: Dict[str, Any]) -> None:
+    """
+    Ensure over_2_5_prob + under_2_5_prob == 1.0 (within rounding).
+    LLMs sometimes emit only one side or values that don't sum — the
+    front-end card would otherwise show "48% over · 0% under" which
+    reads as broken. Mutates `tg` in place.
+    """
+    over_raw = tg.get("over_2_5_prob")
+    under_raw = tg.get("under_2_5_prob")
+    try:
+        over = float(over_raw) if over_raw is not None else None
+    except (TypeError, ValueError):
+        over = None
+    try:
+        under = float(under_raw) if under_raw is not None else None
+    except (TypeError, ValueError):
+        under = None
+
+    if over is None and under is None:
+        over = under = 0.5
+    elif over is None:
+        over = max(0.0, min(1.0, 1.0 - under))
+    elif under is None:
+        under = max(0.0, min(1.0, 1.0 - over))
+    else:
+        s = over + under
+        if s > 0 and abs(s - 1.0) > 0.05:
+            over, under = over / s, under / s
+
+    tg["over_2_5_prob"] = round(over, 3)
+    tg["under_2_5_prob"] = round(under, 3)
