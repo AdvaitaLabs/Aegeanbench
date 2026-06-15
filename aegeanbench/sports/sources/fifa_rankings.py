@@ -25,7 +25,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +64,6 @@ _live_state: Dict = {
     "source": "uninitialised",
 }
 
-
-# Map FIFA's 3-letter codes to our internal codes when they diverge.
-# FIFA mostly uses ISO-3 too, but a handful differ (KSA <-> KOR, etc.).
-_FIFA_CODE_ALIASES: Dict[str, str] = {
-    "KSA": "KSA", "KOR": "KOR", "RSA": "RSA", "USA": "USA",
-    "ENG": "ENG", "WAL": "WAL", "CIV": "CIV", "CRC": "CRC",
-    "CPV": "CPV",
-}
 
 
 def _fetch_live_rankings() -> Optional[Dict[str, int]]:
@@ -183,6 +175,14 @@ _ELO_TO_FIFA: Dict[str, str] = {
     "NO": "NOR", "VE": "VEN", "PA": "PAN", "CA": "CAN", "QA": "QAT",
     "SA": "KSA", "JO": "JOR", "UZ": "UZB", "ZA": "RSA", "IR": "IRN",
     "JM": "JAM", "CR": "CRC", "GH": "GHA", "CV": "CPV",
+    # Missed in v1 — caught when SWE/TUN landed in WC group F:
+    "SE": "SWE", "BA": "BIH", "CZ": "CZE", "PA": "PAN", "RO": "ROU",
+    "GR": "GRE", "SK": "SVK", "FI": "FIN", "IE": "IRL", "SC": "SCO",
+    "NI": "NIR", "IS": "ISL", "AL": "ALB", "ME": "MNE", "MK": "MKD",
+    "MR": "MTN",  # Mauritania
+    "DZ": "ALG",  # Algeria
+    "NG": "NGA",  # Nigeria
+    "CM": "CMR",  # Cameroon
 }
 
 
