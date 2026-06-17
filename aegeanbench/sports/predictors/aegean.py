@@ -80,12 +80,22 @@ class AegeanPredictor(Predictor):
         agent_weights: Optional[Dict[str, float]] = None,
         mock: Optional[bool] = None,
         quorum_threshold: float = 0.6,
-        max_rounds: int = 4,
-        # Bumped from 60s -> 120s -> 150s. The richer prompt (likely_
-        # scores / halves / top_scorers extra fields) makes outputs
-        # 30-40% longer, so consensus can run ~110-140s under Praka
-        # load. nginx upstream timeout is 180s so we keep margin.
-        timeout: float = 150.0,
+        # Lowered 4 -> 2. Measured: agents converge by round 1-2 on
+        # real match prompts (round 1 already reaches agreement), so
+        # rounds 3-4 mostly burn opus latency without changing the
+        # outcome. 2 rounds halves worst-case wall time and keeps us
+        # well under the request timeout.
+        max_rounds: int = 2,
+        # Bumped from 60s -> 120s -> 150s -> 300s. Measured: a tiny
+        # prompt with 3 agents x 2 rounds already takes ~50s under
+        # Praka/opus. The real bilingual prompt (likely_scores /
+        # halves / top_scorers) with the full agent panel and up to
+        # max_rounds refinement regularly exceeds 150s, which tripped
+        # ReadTimeout -> silent mock fallback. 300s gives headroom.
+        # NOTE: if a reverse proxy sits in front of consensus, its
+        # upstream read timeout (was 180s) must be raised to match,
+        # otherwise the proxy 504s before this fires.
+        timeout: float = 300.0,
     ):
         self.base_url = (
             base_url
