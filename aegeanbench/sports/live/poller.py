@@ -35,6 +35,15 @@ _HIGH_PRIORITY_KINDS = {
 # don't fire a discrete trigger (sustained pressure, possession swing).
 _PERIODIC_REFRESH_SECONDS = 8 * 60
 
+# TTL for the consensus the live ticker writes. Kept slightly longer
+# than the periodic refresh so there is always exactly one fresh live
+# prediction in the cache for /predict (and get_latest_for_match) to
+# reuse — every viewer shares it instead of running their own. Because
+# the ticker stores after kickoff, its entry is always newer than any
+# pre-match warm, so reuse never serves a stale pre-match prediction
+# once a match is under way.
+_LIVE_CACHE_TTL_SECONDS = _PERIODIC_REFRESH_SECONDS + 120
+
 
 class LiveEventPoller:
     """
@@ -48,11 +57,21 @@ class LiveEventPoller:
         scheduler,
         prediction_cache,
         interval_seconds: float = _POLL_INTERVAL_SECONDS,
+        gateway=None,
+        agent_ids=None,
+        lang: str = "en",
     ):
         self.live_hub = live_hub
         self.scheduler = scheduler
         self.prediction_cache = prediction_cache
         self.interval = interval_seconds
+        # When a gateway is wired the ticker re-runs consensus itself and
+        # broadcasts the fresh prediction (one run per match per refresh,
+        # decoupled from viewer count). Without one it falls back to the
+        # legacy "invalidate + tell clients to re-fetch" behaviour.
+        self.gateway = gateway
+        self.agent_ids = agent_ids
+        self.lang = lang
         self._task: Optional[asyncio.Task] = None
         self._seen: Set[str] = set()  # event_ids we've already pushed
         self._disabled_reason: Optional[str] = None  # soft-disable flag
@@ -192,6 +211,71 @@ class LiveEventPoller:
                 home, score.get("home", 0), score.get("away", 0), away, fd_minute,
             )
 
+    async def _recompute_and_broadcast(self, match, reason: str, detail: str) -> None:
+        """
+        Feature B: drop the stale cache, run ONE consensus for this match,
+        store it with a short live TTL and broadcast the fresh prediction
+        to the match:{id} WebSocket channel. Every viewer reuses this one
+        result instead of each triggering their own ~80s consensus.
+
+        Falls back to a notify-only "consensus_invalidated" message when no
+        gateway is wired, the match can't be resolved, or the run fell back
+        to mock — so the front-end still knows to refresh.
+        """
+        match_id = match.match_id
+        ts = datetime.now(timezone.utc).isoformat()
+        self.prediction_cache.invalidate_match(match_id)
+
+        async def _notify_only():
+            await self.live_hub.publish(
+                f"match:{match_id}",
+                {
+                    "type": "consensus_invalidated",
+                    "match_id": match_id,
+                    "reason": reason,
+                    "detail": detail,
+                    "ts": ts,
+                },
+            )
+
+        if self.gateway is None:
+            await _notify_only()
+            return
+
+        agent_ids = self.agent_ids
+        if not agent_ids:
+            from aegeanbench.sports.predictors.aegean import DEFAULT_AGENT_TYPES
+            agent_ids = list(DEFAULT_AGENT_TYPES)
+
+        try:
+            from aegeanbench.sports.reporter import prediction_service as svc
+            payload = await svc.run_and_cache(
+                gateway=self.gateway,
+                cache=self.prediction_cache,
+                match_id=match_id,
+                agent_ids=agent_ids,
+                lang=self.lang,
+                home_team=(getattr(match, "home_team", "") or None),
+                away_team=(getattr(match, "away_team", "") or None),
+                cache_ttl=_LIVE_CACHE_TTL_SECONDS,
+                source="live_ticker",
+                live_hub=self.live_hub,
+                broadcast=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("live re-consensus failed for %s: %s", match_id, e)
+            payload = None
+
+        # Always emit the legacy consensus_invalidated signal too. Any
+        # front-end that already re-fetches /predict on it keeps working
+        # unchanged — and now hits the warm cache the ticker just wrote
+        # (instant, one shared run) instead of triggering its own. New
+        # clients can additionally consume the prediction_update that
+        # run_and_cache broadcast on success.
+        await _notify_only()
+        if payload is not None and not (payload.get("_meta") or {}).get("is_mock"):
+            logger.info("live ticker broadcast fresh consensus for %s (%s)", match_id, reason)
+
     async def _handle_match(self, client, match) -> None:
         # Periodic refresh: if the match is live and we haven't flushed
         # the cache in PERIODIC_REFRESH_SECONDS, force a re-consensus
@@ -202,22 +286,11 @@ class LiveEventPoller:
         last = self._last_periodic_refresh.get(match.match_id, 0.0)
         if now_ts - last > _PERIODIC_REFRESH_SECONDS:
             self._last_periodic_refresh[match.match_id] = now_ts
-            n = self.prediction_cache.invalidate_match(match.match_id)
-            if n > 0 or last > 0:
-                logger.info(
-                    "periodic refresh: flushed %d cache entries for %s",
-                    n, match.match_id,
-                )
-                await self.live_hub.publish(
-                    f"match:{match.match_id}",
-                    {
-                        "type": "consensus_invalidated",
-                        "match_id": match.match_id,
-                        "reason": "periodic_refresh",
-                        "detail": f"every {_PERIODIC_REFRESH_SECONDS // 60} min during live play",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    },
-                )
+            await self._recompute_and_broadcast(
+                match,
+                reason="periodic_refresh",
+                detail=f"every {_PERIODIC_REFRESH_SECONDS // 60} min during live play",
+            )
 
         events = client.fetch_match_events(match.match_id)
         if events is None:
@@ -251,20 +324,14 @@ class LiveEventPoller:
             if ev.kind.value in _HIGH_PRIORITY_KINDS:
                 trigger = self.scheduler.on_live_event(ev)
                 if trigger is not None:
-                    n = self.prediction_cache.invalidate_match(match.match_id)
                     logger.info(
-                        "live event %s @ %s' triggered cache flush (%d entries) for %s",
-                        ev.kind.value, ev.minute, n, match.match_id,
+                        "live event %s @ %s' triggered re-consensus for %s",
+                        ev.kind.value, ev.minute, match.match_id,
                     )
-                    await self.live_hub.publish(
-                        f"match:{match.match_id}",
-                        {
-                            "type": "consensus_invalidated",
-                            "match_id": match.match_id,
-                            "reason": trigger.reason.value,
-                            "detail": trigger.detail,
-                            "ts": envelope["ts"],
-                        },
+                    await self._recompute_and_broadcast(
+                        match,
+                        reason=trigger.reason.value,
+                        detail=trigger.detail,
                     )
 
         # Trim the seen set so it doesn't grow unbounded across days

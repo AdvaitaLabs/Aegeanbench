@@ -100,27 +100,30 @@ class TestScheduler:
         assert s.on_chat_heat("M1", 50) is not None  # above threshold
 
     def test_pre_match_checkpoint_fires_once(self):
-        from aegeanbench.sports.live.scheduler import MatchEventScheduler
+        from aegeanbench.sports.live.scheduler import (
+            MatchEventScheduler,
+            PRE_MATCH_CHECKPOINTS_HOURS,
+        )
 
+        # Derive from the configured checkpoints (T-24h / T-1h) so this
+        # test tracks the constant instead of hard-coding the hours.
+        first_cp, second_cp = PRE_MATCH_CHECKPOINTS_HOURS[0], PRE_MATCH_CHECKPOINTS_HOURS[1]
         s = MatchEventScheduler()
         kickoff = datetime(2026, 6, 11, 18, 0, tzinfo=timezone.utc)
 
-        # Now is exactly T-2h
-        t_minus_2h = kickoff - timedelta(hours=2)
-        trigger1 = s.on_clock_tick("M1", kickoff, now=t_minus_2h)
+        # Now is exactly the first checkpoint.
+        t_first = kickoff - timedelta(hours=first_cp)
+        trigger1 = s.on_clock_tick("M1", kickoff, now=t_first)
         assert trigger1 is not None
 
-        # Same checkpoint should not fire again
-        trigger2 = s.on_clock_tick("M1", kickoff, now=t_minus_2h + timedelta(seconds=20))
+        # Same checkpoint should not fire again.
+        trigger2 = s.on_clock_tick("M1", kickoff, now=t_first + timedelta(seconds=20))
         assert trigger2 is None
 
-        # T-30m checkpoint should still fire
-        t_minus_30m = kickoff - timedelta(minutes=30)
-        # Use a fresh scheduler so throttle doesn't block; or wait long enough
-        s2 = MatchEventScheduler(min_reconsensus_seconds=60)
-        s2.on_clock_tick("M1", kickoff, now=t_minus_2h)
-        # Advance simulated time past the throttle window
-        trigger3 = s2.on_clock_tick("M1", kickoff, now=t_minus_30m)
+        # The second checkpoint should still fire (the gap between the two
+        # checkpoints far exceeds the re-consensus throttle).
+        t_second = kickoff - timedelta(hours=second_cp)
+        trigger3 = s.on_clock_tick("M1", kickoff, now=t_second)
         assert trigger3 is not None
 
     def test_manual_trigger_bypasses_throttle(self):

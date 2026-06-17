@@ -224,6 +224,21 @@ def create_app(
     # time) land. Soft-fails if the soccersapi plan doesn't cover
     # events — logged once, then idle.
     from aegeanbench.sports.live.poller import LiveEventPoller
+    from aegeanbench.sports.live.prematch import PrematchWarmer
+
+    # Language the background workers compute live / pre-match consensus
+    # in. All viewers of a match share one broadcast, so we pick a single
+    # default (override with AEGEAN_LIVE_LANG). Per-user language still
+    # works on an explicit force=True /predict.
+    _live_lang = os.getenv("AEGEAN_LIVE_LANG", "zh")
+
+    def _shared_gateway():
+        gw = getattr(app.state, "gateway", None)
+        if gw is None:
+            from aegeanbench.sports.gateway import SportsDataGateway
+            gw = SportsDataGateway(mock=False)
+            app.state.gateway = gw
+        return gw
 
     @app.on_event("startup")
     async def _start_live_poller():
@@ -231,19 +246,44 @@ def create_app(
             logger.warning("LIVE_POLLER_DISABLED is set — poller not started")
             return
         logger.warning("startup hook: building LiveEventPoller")
+        # Feature B: hand the poller the gateway + default panel so it can
+        # re-run consensus itself and broadcast the result (one run per
+        # match per refresh, independent of how many viewers are watching)
+        # instead of just telling every client to re-fetch.
         poller = LiveEventPoller(
             live_hub=live_hub,
             scheduler=scheduler,
             prediction_cache=app.state.prediction_cache,
+            gateway=_shared_gateway(),
+            lang=_live_lang,
         )
         poller.start()
         app.state.live_poller = poller
 
+    @app.on_event("startup")
+    async def _start_prematch_warmer():
+        if os.getenv("PREMATCH_WARMER_DISABLED", "").lower() in ("1", "true", "yes"):
+            logger.warning("PREMATCH_WARMER_DISABLED is set — warmer not started")
+            return
+        logger.warning("startup hook: building PrematchWarmer")
+        # Feature A: pre-compute consensus at T-24h / T-1h so users get
+        # instant cached reads before kickoff. Shares the scheduler with
+        # the poller for consistent throttle / once-per-checkpoint state.
+        warmer = PrematchWarmer(
+            gateway=_shared_gateway(),
+            scheduler=scheduler,
+            prediction_cache=app.state.prediction_cache,
+            lang=_live_lang,
+        )
+        warmer.start()
+        app.state.prematch_warmer = warmer
+
     @app.on_event("shutdown")
-    async def _stop_live_poller():
-        poller = getattr(app.state, "live_poller", None)
-        if poller is not None:
-            await poller.stop()
+    async def _stop_background_tasks():
+        for attr in ("live_poller", "prematch_warmer"):
+            task = getattr(app.state, attr, None)
+            if task is not None:
+                await task.stop()
 
     # Pre-warm cold caches in a background thread at boot so the first
     # /answer or /predict doesn't wait for: (a) the martj42 results CSV
@@ -363,84 +403,21 @@ def create_app(
                 detail="at least one valid agent_id is required",
             )
 
-        # Build the Match shell from the caller's body, then let the
-        # SportsDataGateway pull odds / lineups / h2h / xG / weather
-        # from the real adapters. The enriched ctx is what makes the
-        # consensus prompt non-empty.
-        from aegeanbench.sports.predictors.aegean import AegeanPredictor
-        from aegeanbench.sports.gateway import MatchContext, SportsDataGateway
-        from aegeanbench.sports.models import (
-            CompetitionStage, Match, Team,
-        )
-        from datetime import datetime as _dt
+        # Reply language priority:
+        #   1. body.lang (explicit override from caller)
+        #   2. match_data.lang (legacy alias)
+        #   3. auto-detect from chat_messages (CJK in any msg -> zh)
+        #   4. English fallback when nothing is detectable
+        from aegeanbench.sports.gateway import SportsDataGateway
+        from aegeanbench.sports.lang import detect_from_signals
+        from aegeanbench.sports.reporter import prediction_service as _svc
 
         md = body.match_data or MatchDataInput()
-
-        # If the caller didn't supply home/away team, auto-resolve from
-        # the match_id via soccersapi's t=info endpoint. Otherwise the
-        # old BRA/ARG defaults would silently predict the wrong match.
-        if not md.home_team or not md.away_team:
-            from aegeanbench.sports.reporter.match_brief import _resolve_match_info
-            resolved = _resolve_match_info(body.match_id)
-            if resolved:
-                home_t = md.home_team or resolved.get("home_team")
-                away_t = md.away_team or resolved.get("away_team")
-                # Pydantic v2: model_copy keeps other fields, updates these
-                md = md.model_copy(update={
-                    "home_team": home_t,
-                    "away_team": away_t,
-                    "venue": md.venue or resolved.get("venue_city"),
-                })
-
-        # If we STILL don't have team names, the front-end gave us a
-        # match_id we can't look up. Fail loud rather than silently
-        # predicting the wrong match.
-        if not md.home_team or not md.away_team:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Could not resolve teams for match_id={body.match_id}. "
-                    "Pass match_data with home_team and away_team explicitly."
-                ),
-            )
-
-        kickoff = (
-            _dt.fromisoformat(md.kickoff_at.replace("Z", "+00:00"))
-            if md.kickoff_at else _dt.now()
+        explicit_lang = body.lang or (
+            body.match_data.model_dump().get("lang") if body.match_data else None
         )
-
-        # FIFA code lookup table for the names the front-end is most
-        # likely to send. Falls back to the first 3 chars when unknown.
-        _FIFA = {
-            "Mexico": "MEX", "South Africa": "RSA", "United States": "USA",
-            "Argentina": "ARG", "Brazil": "BRA", "France": "FRA",
-            "Germany": "GER", "Spain": "ESP", "England": "ENG",
-            "Portugal": "POR", "Netherlands": "NED", "Italy": "ITA",
-            "Belgium": "BEL", "Croatia": "CRO", "Japan": "JPN",
-            "Korea Republic": "KOR", "South Korea": "KOR",
-            "Morocco": "MAR", "Saudi Arabia": "KSA",
-            "Canada": "CAN", "Australia": "AUS",
-        }
-        def _fifa(name: Optional[str], default: str) -> str:
-            if not name:
-                return default
-            return _FIFA.get(name, name[:3].upper())
-
-        match = Match(
-            match_id=body.match_id,
-            competition="FIFA World Cup 2026",
-            stage=CompetitionStage.GROUP,
-            kickoff_at=kickoff,
-            home_team=Team(
-                fifa_code=_fifa(md.home_team, md.home_team[:3].upper() if md.home_team else "???"),
-                name=md.home_team,
-            ),
-            away_team=Team(
-                fifa_code=_fifa(md.away_team, md.away_team[:3].upper() if md.away_team else "???"),
-                name=md.away_team,
-            ),
-            venue=md.venue,
-        )
+        chat_texts = [m.text for m in (body.chat_messages or [])]
+        lang = explicit_lang or detect_from_signals(None, chat_texts) or "en"
 
         # Singleton gateway so adapter HTTP clients and the file cache
         # stay warm across requests. Lazy-built on first /predict.
@@ -449,42 +426,6 @@ def create_app(
             gw = SportsDataGateway(mock=False)
             app.state.gateway = gw
 
-        try:
-            ctx = gw.build_context(match)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("gateway.build_context failed for %s: %s", body.match_id, exc)
-            ctx = MatchContext(
-                match=match, home_history=[], away_history=[], h2h=[],
-                home_xg_profile={}, away_xg_profile={},
-            )
-
-        # Carry chat snapshot via ctx.chat_summary (NOT on match.h2h_last5
-        # — that field belongs to real head-to-head data and is now
-        # populated by the gateway).
-        if body.chat_messages:
-            ctx.chat_summary = "\n".join(
-                f"  - {m.user_name}: {m.text}"
-                for m in body.chat_messages[-30:]
-            )
-
-        # Reply language priority:
-        #   1. body.lang (explicit override from caller)
-        #   2. match_data.lang (legacy alias)
-        #   3. auto-detect from chat_messages (CJK in any msg -> zh)
-        #   4. English fallback when nothing is detectable
-        from aegeanbench.sports.lang import detect_from_signals
-        explicit_lang = body.lang or (
-            body.match_data.model_dump().get("lang") if body.match_data else None
-        )
-        chat_texts = [m.text for m in (body.chat_messages or [])]
-        lang = explicit_lang or detect_from_signals(None, chat_texts) or "en"
-
-        # Cache check before paying the 20-30s consensus cost.
-        # IMPORTANT: skip the cache entirely for in-play matches. A 60s
-        # stale prediction is fine for a pre-match panel but disastrous
-        # for live — the score, minute, and recent events all change
-        # within the cache window, and product saw "1-0 but consensus
-        # still picks the losing side" precisely because of this.
         cache = app.state.prediction_cache
         cache_key = cache.make_key(
             match_id=body.match_id,
@@ -492,69 +433,67 @@ def create_app(
             lang=lang,
             chat_messages=body.chat_messages,
         )
-        is_in_play = bool(getattr(ctx, "live_state", None))
-        cached_payload = None if is_in_play else cache.get(cache_key)
-        if cached_payload is not None:
-            # Echo back with cache flag so the client can show "cached".
-            cached = dict(cached_payload)
-            meta = dict(cached.get("_meta") or {})
+
+        def _echo_cached(p: Dict[str, Any], reused: bool) -> Dict[str, Any]:
+            out = dict(p)
+            meta = dict(out.get("_meta") or {})
             meta["cache_hit"] = True
-            cached["_meta"] = meta
-            cached["table_id"] = body.table_id   # echo per-caller field
-            return cached
+            if reused:
+                meta["reused"] = True
+            out["_meta"] = meta
+            out["table_id"] = body.table_id   # echo per-caller field
+            return out
 
-        predictor = AegeanPredictor(agent_types=requested)
-        prediction = predictor.predict(ctx, lang=lang)
+        # 1) Exact hit: byte-identical request within TTL, including a
+        #    pre-warmed pre-match prediction.
+        exact = cache.get(cache_key)
+        if exact is not None:
+            return _echo_cached(exact, reused=False)
 
-        # Detect whether this was a real consensus run or a fallback to
-        # mock. The predictor sets rationale to "[mock] ..." and
-        # tokens_used==0 + latency_ms<=1 when it bailed. We refuse to
-        # cache these so a single Praka hiccup doesn't poison 60 seconds
-        # of identical requests.
-        is_mock = (
-            prediction.rationale.startswith("[mock")
-            or (prediction.tokens_used == 0 and prediction.latency_ms <= 1)
+        # 2) Reuse the latest real prediction for this match in this
+        #    language (features C + B), regardless of chat signature or
+        #    agent panel. This is fully transparent to the front-end —
+        #    same request, same response shape:
+        #      - C (chat debounce): casual group chat re-POSTs /predict on
+        #        every message; all reuse one prediction. Refreshes are
+        #        driven by the schedulers (pre-match checkpoints / live
+        #        ticker), NOT by user chat, so chatter never burns opus.
+        #      - B (live): every viewer reuses the single prediction the
+        #        live ticker computed instead of each running consensus.
+        #    The TTL encodes freshness (pre-match warm = long, live ticker
+        #    = short and always newest), so once a match is under way the
+        #    ticker's entry wins and we never serve a stale pre-match one.
+        #    lang-filtered so a zh viewer is never served en text.
+        latest = cache.get_latest_for_match(body.match_id, lang=lang)
+        if latest is not None:
+            return _echo_cached(latest, reused=True)
+
+        # 3) Fresh consensus: only when nothing is cached for this match +
+        #    language yet (first request, or everything expired). The heavy
+        #    work runs in a worker thread inside the service so the event
+        #    loop (and WebSocket fan-out) stays responsive.
+        payload = await _svc.run_and_cache(
+            gateway=gw,
+            cache=cache,
+            match_id=body.match_id,
+            agent_ids=requested,
+            lang=lang,
+            home_team=md.home_team,
+            away_team=md.away_team,
+            kickoff_iso=md.kickoff_at,
+            venue=md.venue,
+            chat_messages=body.chat_messages,
+            table_id=body.table_id,
+            source="predict",
         )
-        if is_mock:
-            logger.warning(
-                "predict for %s fell back to mock (latency=%dms, tokens=%d)"
-                " — NOT caching",
-                body.match_id, prediction.latency_ms, prediction.tokens_used,
+        if payload is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Could not resolve teams for match_id={body.match_id}. "
+                    "Pass match_data with home_team and away_team explicitly."
+                ),
             )
-
-        payload = {
-            "_meta": {
-                "endpoint": "POST /api/v1/predict",
-                "description": "One-shot consensus prediction for a user-defined table",
-                "cache_hit": False,
-                "is_mock": is_mock,
-            },
-            "table_id": body.table_id,
-            "match_id": body.match_id,
-            "agents_used": requested,
-            "prediction": {
-                "p_home_win": prediction.p_home_win,
-                "p_draw": prediction.p_draw,
-                "p_away_win": prediction.p_away_win,
-                "confidence": prediction.confidence,
-                "rationale": prediction.rationale,
-                "latency_ms": prediction.latency_ms,
-                "tokens_used": prediction.tokens_used,
-                # Richer prediction fields (model may omit when data
-                # is thin — clients should treat each as optional)
-                "key_factors": (prediction.metadata or {}).get("key_factors") or [],
-                "likely_scores": (prediction.metadata or {}).get("likely_scores") or [],
-                "total_goals": (prediction.metadata or {}).get("total_goals"),
-                "halves": (prediction.metadata or {}).get("halves"),
-                "top_scorers": (prediction.metadata or {}).get("top_scorers") or [],
-            },
-            "discussion": (prediction.metadata or {}).get("discussion"),
-        }
-        # Only cache real predictions, AND never cache in-play matches
-        # (their state changes too fast). Mock / failed responses also
-        # bypass the cache so the next attempt re-runs cleanly.
-        if not is_mock and not is_in_play:
-            cache.put(cache_key, match_id=body.match_id, payload=payload)
         return payload
 
     # ---------- bundle endpoints (reduce frontend chattiness) ----------

@@ -35,7 +35,11 @@ logger = logging.getLogger(__name__)
 
 # Minimum gap between consecutive consensus runs for the same match.
 MIN_RECONSENSUS_SECONDS = 300   # 5 minutes
-PRE_MATCH_CHECKPOINTS_HOURS = (2.0, 0.5)   # T-2h and T-30m
+# Pre-match warm checkpoints (feature A): an early snapshot a day out and
+# a final refresh ~1h before kickoff once lineups/odds firm up. The
+# background warmer pre-computes consensus at each so users get instant
+# cached reads before the match.
+PRE_MATCH_CHECKPOINTS_HOURS = (24.0, 1.0)   # T-24h and T-1h
 
 # Soft chat-heat triggers (only fire when nothing else has lately).
 CHAT_HEAT_MIN_MESSAGES = 30

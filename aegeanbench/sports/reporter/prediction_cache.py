@@ -38,7 +38,10 @@ class PredictionCache:
         self.ttl = ttl_seconds
         self.max_entries = max_entries
         self._lock = threading.Lock()
-        self._store: "OrderedDict[str, Tuple[float, Dict[str, Any]]]" = OrderedDict()
+        # Each entry is (stored_at, expires_at, payload). expires_at lets
+        # pre-warmed pre-match predictions live far longer than the 60s
+        # default while live refreshes keep a short shelf life.
+        self._store: "OrderedDict[str, Tuple[float, float, Dict[str, Any]]]" = OrderedDict()
         self._match_keys: Dict[str, set] = {}   # match_id -> set of keys
         self.hits = 0
         self.misses = 0
@@ -73,8 +76,8 @@ class PredictionCache:
             if entry is None:
                 self.misses += 1
                 return None
-            ts, payload = entry
-            if time.time() - ts > self.ttl:
+            _stored_at, expires_at, _lang, payload = entry
+            if time.time() > expires_at:
                 self._store.pop(key, None)
                 self.misses += 1
                 return None
@@ -83,9 +86,26 @@ class PredictionCache:
             self.hits += 1
             return payload
 
-    def put(self, key: str, match_id: str, payload: Dict[str, Any]) -> None:
+    def put(
+        self,
+        key: str,
+        match_id: str,
+        payload: Dict[str, Any],
+        ttl: Optional[float] = None,
+        lang: Optional[str] = None,
+    ) -> None:
+        """
+        Store a prediction. ttl overrides the default shelf life for this
+        entry only — pre-match warm writes pass a long ttl (e.g. an hour)
+        so they survive until kickoff, live refreshes pass a short one.
+
+        lang is recorded so get_latest_for_match can reuse the right
+        language's prediction (a zh viewer must not be served en text).
+        """
+        now = time.time()
+        effective_ttl = self.ttl if ttl is None else ttl
         with self._lock:
-            self._store[key] = (time.time(), payload)
+            self._store[key] = (now, now + effective_ttl, lang, payload)
             self._store.move_to_end(key)
             self._match_keys.setdefault(match_id, set()).add(key)
             # LRU eviction
@@ -96,6 +116,48 @@ class PredictionCache:
                     keys.discard(evicted_key)
                     if not keys:
                         self._match_keys.pop(mid, None)
+
+    def get_latest_for_match(
+        self,
+        match_id: str,
+        lang: Optional[str] = None,
+        max_age_seconds: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the most-recently-stored, non-expired prediction for a
+        match. When lang is given, only entries computed in that language
+        are considered.
+
+        Used by:
+          - the live path, so every viewer reuses the single prediction
+            the background ticker computed instead of each running their
+            own consensus;
+          - the chat debounce, so a fresh burst of chatter serves the
+            last real prediction instead of recomputing — refreshes are
+            driven by the schedulers (pre-match checkpoints / live ticker),
+            not by user chat.
+
+        max_age_seconds, when set, additionally requires the entry to be
+        younger than that (independent of its TTL).
+        """
+        now = time.time()
+        with self._lock:
+            keys = self._match_keys.get(match_id, set())
+            best: Optional[Tuple[float, Dict[str, Any]]] = None
+            for key in list(keys):
+                entry = self._store.get(key)
+                if entry is None:
+                    continue
+                stored_at, expires_at, entry_lang, payload = entry
+                if now > expires_at:
+                    continue
+                if lang is not None and entry_lang is not None and entry_lang != lang:
+                    continue
+                if max_age_seconds is not None and now - stored_at > max_age_seconds:
+                    continue
+                if best is None or stored_at > best[0]:
+                    best = (stored_at, payload)
+            return best[1] if best else None
 
     def invalidate_match(self, match_id: str) -> int:
         """
