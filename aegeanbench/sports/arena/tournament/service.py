@@ -136,18 +136,21 @@ class TournamentService:
 
     @staticmethod
     def _entry_meta(runner: _Runner, *, status: str, forecast: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
+        ok = status == "ok"
+        # When unavailable, don't surface the mock-fallback bracket — null
+        # the prediction fields so the client never renders a fake forecast.
         return {
             "_meta": {"endpoint": "GET /api/v1/arena/tournament/{runner_id}", "cache_hit": False},
             "runner_id": runner.runner_id, "display_name": runner.display_name,
             "kind": runner.kind, "model": runner.model_id, "cost_usd": runner.cost_usd,
             "status": status, "latency_ms": latency_ms,
-            "champion": forecast.get("champion"),
-            "runner_up": forecast.get("runner_up"),
-            "third_place": forecast.get("third_place"),
-            "narrative": forecast.get("narrative", ""),
-            "groups": forecast.get("groups", []),
-            "knockout": forecast.get("knockout", {"rounds": []}),
-            "top_scorers": forecast.get("top_scorers", []),
+            "champion": forecast.get("champion") if ok else None,
+            "runner_up": forecast.get("runner_up") if ok else None,
+            "third_place": forecast.get("third_place") if ok else None,
+            "narrative": forecast.get("narrative", "") if ok else "",
+            "groups": forecast.get("groups", []) if ok else [],
+            "knockout": forecast.get("knockout", {"rounds": []}) if ok else {"rounds": []},
+            "top_scorers": forecast.get("top_scorers", []) if ok else [],
         }
 
     # ---------------- list (summaries) ----------------
