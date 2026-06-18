@@ -84,7 +84,10 @@ def _predict_group_scores(client, groups: List[Dict[str, Any]], lang: str) -> Li
         m["home_goals"], m["away_goals"] = int(hg_ag[0]), int(hg_ag[1])
         m["played"] = True            # predicted counts as played for the table
         m["actual"] = False
-    return groups
+    # Report whether the LLM actually contributed (vs all mock fallback) so
+    # the service can flag a model whose endpoint failed as unavailable
+    # instead of dressing up a mock bracket as a real forecast.
+    return bool(predicted)
 
 
 # ----------------------------- stage 3: knockout -----------------------------
@@ -207,7 +210,7 @@ def generate_forecast(*, client, real_state: Dict[str, Any], lang: str = "en") -
     groups_in = copy.deepcopy(real_state.get("groups") or [])
 
     # 1. predict remaining group scores
-    _predict_group_scores(client, groups_in, lang)
+    group_llm_used = _predict_group_scores(client, groups_in, lang)
     # 2. compute tables + advancers (deterministic)
     groups = st.build_groups_with_standings(
         [{"group": g["group"], "teams": g.get("teams") or [t["team"] for t in g.get("standings", [])],
@@ -242,6 +245,11 @@ def generate_forecast(*, client, real_state: Dict[str, Any], lang: str = "en") -
                      if lang.lower().startswith("zh")
                      else f"Predicted champion {champion}, runner-up {runner_up}, third {third}.")
 
+    # The LLM "really worked" if any stage returned usable data. When a
+    # client was supplied but nothing came back, every score is mock — the
+    # caller should treat that as unavailable, not a genuine forecast.
+    llm_used = bool(group_llm_used) or bool(ko_lookup) or bool(narrative and not narrative.startswith(("预测冠军", "Predicted champion")))
+
     return {
         "champion": champion,
         "runner_up": runner_up,
@@ -251,4 +259,5 @@ def generate_forecast(*, client, real_state: Dict[str, Any], lang: str = "en") -
         "knockout": {"rounds": rounds},
         "top_scorers": scorers,
         "source_state": real_state.get("source"),
+        "_llm_used": llm_used,
     }

@@ -115,10 +115,15 @@ class TournamentService:
             return None
         state = self._real_state()
         start = time.time()
+        client = self._client(runner.model_id)
         try:
-            forecast = gen.generate_forecast(client=self._client(runner.model_id),
-                                            real_state=state, lang=lang)
-            status = "ok" if forecast.get("champion") else "unavailable"
+            forecast = gen.generate_forecast(client=client, real_state=state, lang=lang)
+            # A model with a configured client that produced no real LLM
+            # output (endpoint rejected the model name, video-only model,
+            # timeouts) is unavailable — don't pass off the mock fallback
+            # bracket as its forecast. client=None is intentional offline mock.
+            llm_failed = client is not None and not forecast.get("_llm_used")
+            status = "ok" if (forecast.get("champion") and not llm_failed) else "unavailable"
         except Exception as e:  # noqa: BLE001
             logger.warning("tournament generate failed for %s: %s", runner_id, e)
             return self._entry_meta(runner, status="unavailable", forecast={},
