@@ -27,6 +27,7 @@ dependency installed; the actual create_app() call will fail loudly with
 an install hint if FastAPI is missing.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -280,7 +281,7 @@ def create_app(
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("live_poller", "prematch_warmer"):
+        for attr in ("live_poller", "prematch_warmer", "arena_warmer", "tournament_warmer"):
             task = getattr(app.state, attr, None)
             if task is not None:
                 await task.stop()
@@ -529,6 +530,125 @@ def create_app(
         if payload is None:
             raise HTTPException(status_code=404, detail=f"no data for match {match_id}")
         return payload
+
+    # ---------------------- Arena: model head-to-head ----------------------
+    # Additive only — these do not touch any existing endpoint. For each
+    # upcoming match they compare aegean-consensus (our enriched, data-
+    # grounded model) against the configured benchmark competitors
+    # (BENCHMARK_MODELS in .env), each returning the same rich schema.
+
+    def _arena_service():
+        svc = getattr(app.state, "arena_service", None)
+        if svc is None:
+            from aegeanbench.sports.arena.service import ArenaService
+            from aegeanbench.sports.gateway import SportsDataGateway
+            gw = getattr(app.state, "gateway", None)
+            if gw is None:
+                gw = SportsDataGateway(mock=False)
+                app.state.gateway = gw
+            # Share the /predict cache so the arena's aegean consensus run
+            # also warms /predict (one run, both consumers).
+            svc = ArenaService(gateway=gw, prediction_cache=app.state.prediction_cache)
+            app.state.arena_service = svc
+        return svc
+
+    @app.get("/api/v1/arena/upcoming")
+    def get_arena_upcoming(lang: str = "en", hours: int = 72):
+        """
+        Upcoming matches with each model's cached prediction summary.
+        Never computes — models not yet run show status="pending".
+        """
+        return _arena_service().upcoming(lang=lang, hours=hours)
+
+    @app.get("/api/v1/arena/matches/{match_id}")
+    async def get_arena_match(
+        match_id: str,
+        home_team: Optional[str] = None,
+        away_team: Optional[str] = None,
+        kickoff_at: Optional[str] = None,
+        venue: Optional[str] = None,
+        lang: str = "en",
+        refresh: bool = False,
+    ):
+        """
+        Full side-by-side comparison for one match (all models, rich
+        schema). Computes + caches on first call; LLM work runs in a
+        worker thread so the event loop stays responsive.
+        """
+        svc = _arena_service()
+        payload = await asyncio.to_thread(
+            svc.compute_match,
+            match_id=match_id, home_team=home_team, away_team=away_team,
+            kickoff_iso=kickoff_at, venue=venue, lang=lang, use_cache=not refresh,
+        )
+        return payload
+
+    @app.on_event("startup")
+    async def _start_arena_warmer():
+        if os.getenv("ARENA_WARMER_DISABLED", "").lower() in ("1", "true", "yes"):
+            logger.warning("ARENA_WARMER_DISABLED is set — arena warmer not started")
+            return
+        logger.warning("startup hook: building ArenaWarmer")
+        # Pre-compute the full arena (all models) at T-24h / T-1h so the
+        # upcoming list shows real predictions. Own scheduler instance so
+        # its once-per-checkpoint state is independent of the PrematchWarmer.
+        from aegeanbench.sports.arena.warmer import ArenaWarmer
+        from aegeanbench.sports.live.scheduler import MatchEventScheduler
+        warmer = ArenaWarmer(
+            arena_service=_arena_service(),
+            scheduler=MatchEventScheduler(),
+            lang=os.getenv("AEGEAN_LIVE_LANG", "zh"),
+        )
+        warmer.start()
+        app.state.arena_warmer = warmer
+
+    # ---------------------- Arena: full tournament forecast ----------------------
+
+    def _tournament_service():
+        svc = getattr(app.state, "tournament_service", None)
+        if svc is None:
+            from aegeanbench.sports.arena.tournament.service import TournamentService
+            from aegeanbench.sports.gateway import SportsDataGateway
+            gw = getattr(app.state, "gateway", None)
+            if gw is None:
+                gw = SportsDataGateway(mock=False)
+                app.state.gateway = gw
+            svc = TournamentService(gateway=gw)
+            app.state.tournament_service = svc
+        return svc
+
+    @app.get("/api/v1/arena/tournament")
+    def get_tournament(lang: str = "en"):
+        """All models' champion / runner-up / third (cached; uncomputed = pending)."""
+        return _tournament_service().list_models(lang=lang)
+
+    @app.get("/api/v1/arena/tournament/actual")
+    def get_tournament_actual(lang: str = "en"):
+        """The factual board: real group tables, results, and top scorers."""
+        return _tournament_service().get_actual(lang=lang)
+
+    @app.get("/api/v1/arena/tournament/{runner_id}")
+    async def get_tournament_model(runner_id: str, lang: str = "en", refresh: bool = False):
+        """One model's full tournament forecast (bracket + tables + scorers)."""
+        svc = _tournament_service()
+        payload = await asyncio.to_thread(svc.compute_model, runner_id, lang, not refresh)
+        if payload is None:
+            raise HTTPException(status_code=404, detail=f"unknown runner {runner_id}")
+        return payload
+
+    @app.on_event("startup")
+    async def _start_tournament_warmer():
+        if os.getenv("TOURNAMENT_WARMER_DISABLED", "").lower() in ("1", "true", "yes"):
+            logger.warning("TOURNAMENT_WARMER_DISABLED is set — tournament warmer not started")
+            return
+        logger.warning("startup hook: building TournamentWarmer")
+        from aegeanbench.sports.arena.tournament.warmer import TournamentWarmer
+        warmer = TournamentWarmer(
+            tournament_service=_tournament_service(),
+            lang=os.getenv("AEGEAN_LIVE_LANG", "zh"),
+        )
+        warmer.start()
+        app.state.tournament_warmer = warmer
 
     @app.get("/api/v1/health")
     def health():
