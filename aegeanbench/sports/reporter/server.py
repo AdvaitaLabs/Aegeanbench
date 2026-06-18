@@ -552,6 +552,16 @@ def create_app(
             app.state.arena_service = svc
         return svc
 
+    @app.get("/api/v1/arena/models")
+    def get_arena_models():
+        """
+        The arena line-up: aegean-consensus + configured benchmark models.
+        Cheap (config only, no LLM) — front-end uses it to render the model
+        list / columns before any prediction is computed.
+        """
+        from aegeanbench.sports.arena.config import arena_roster
+        return {"_meta": {"endpoint": "GET /api/v1/arena/models"}, "models": arena_roster()}
+
     @app.get("/api/v1/arena/upcoming")
     def get_arena_upcoming(lang: str = "en", hours: int = 72):
         """

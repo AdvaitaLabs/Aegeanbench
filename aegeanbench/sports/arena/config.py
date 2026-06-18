@@ -45,6 +45,36 @@ def _slug(model_id: str) -> str:
     return model_id.strip().lower().replace(" ", "-")
 
 
+def arena_roster() -> List[dict]:
+    """
+    The full arena line-up: aegean-consensus (ours) + every configured
+    benchmark competitor. Cheap (config only, no LLM) so the front-end can
+    render the model list / column headers immediately, regardless of
+    whether any prediction has been computed yet.
+    """
+    aegean_model = os.getenv("OPENAI_MODEL", "claude-opus-4-6")
+    roster = [{
+        "runner_id": "aegean-consensus",
+        "display_name": "Aegean Consensus",
+        "kind": "aegean",
+        "is_ours": True,
+        "model": aegean_model,
+        "match_cost_usd": float(os.getenv("AEGEAN_COST_USD", "0.11")),
+        "tournament_cost_usd": float(os.getenv("AEGEAN_TOURNAMENT_COST", "0.50")),
+    }]
+    for m in load_benchmark_models():
+        roster.append({
+            "runner_id": m.runner_id,
+            "display_name": m.display_name,
+            "kind": "benchmark",
+            "is_ours": False,
+            "model": m.model_id,
+            "match_cost_usd": m.cost_usd,
+            "tournament_cost_usd": m.cost_usd,
+        })
+    return roster
+
+
 def load_benchmark_models(env_value: str = None) -> List[BenchmarkModel]:
     """
     Parse BENCHMARK_MODELS into a list of BenchmarkModel. Returns [] when
