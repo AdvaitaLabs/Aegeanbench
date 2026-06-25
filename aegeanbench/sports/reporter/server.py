@@ -593,6 +593,32 @@ def create_app(
         )
         return payload
 
+    @app.get("/api/v1/arena/matches/{match_id}/strategy")
+    def get_match_strategy(match_id: str, home_team: Optional[str] = None,
+                           away_team: Optional[str] = None, lang: str = "en"):
+        """
+        Polymarket value-bet strategy for one match: aegean's cached
+        probabilities vs the live Polymarket market-winner odds (edge +
+        Kelly). aegean-only. Degrades to model-only when no market exists.
+        """
+        from aegeanbench.sports.arena.polymarket import PolymarketClient, PMMarket
+        from aegeanbench.sports.arena import strategy as strat
+        cached = app.state.prediction_cache.get_latest_for_match(match_id, lang=lang)
+        model_probs = {"home_win": 0, "draw": 0, "away_win": 0}
+        if cached:
+            p = cached.get("prediction") or {}
+            model_probs = {"home_win": p.get("p_home_win", 0), "draw": p.get("p_draw", 0),
+                           "away_win": p.get("p_away_win", 0)}
+        if home_team and away_team:
+            pm = PolymarketClient().match_market(home_team, away_team)
+        else:
+            pm = PMMarket(status="none", kind="match",
+                          reason="pass home_team & away_team to look up the Polymarket market")
+        result = strat.match_strategy(model_probs, pm)
+        result["_meta"] = {"endpoint": "GET /api/v1/arena/matches/{match_id}/strategy",
+                           "match_id": match_id, "model_available": bool(cached)}
+        return result
+
     @app.on_event("startup")
     async def _start_arena_warmer():
         if os.getenv("ARENA_WARMER_DISABLED", "").lower() in ("1", "true", "yes"):
@@ -636,6 +662,30 @@ def create_app(
     def get_tournament_actual(lang: str = "en"):
         """The factual board: real group tables, results, and top scorers."""
         return _tournament_service().get_actual(lang=lang)
+
+    @app.get("/api/v1/arena/tournament/strategy")
+    def get_tournament_strategy(market: str = "champion", lang: str = "en"):
+        """
+        Polymarket outright strategy: aegean's per-team champion%/advance%
+        vs the live Polymarket winner / to-advance market (edge + Kelly per
+        team). market=champion|qualification. aegean-only; model-only when
+        no market exists.
+        """
+        from aegeanbench.sports.arena.polymarket import PolymarketClient
+        from aegeanbench.sports.arena import strategy as strat
+        svc = _tournament_service()
+        probs = svc.team_probabilities(lang=lang)
+        client = PolymarketClient()
+        if market == "qualification":
+            pm = client.qualification_market()
+            model = probs.get("advance", {})
+        else:
+            market = "champion"
+            pm = client.champion_market()
+            model = probs.get("champion", {})
+        result = strat.outright_strategy(model, pm, kind=market)
+        result["_meta"] = {"endpoint": "GET /api/v1/arena/tournament/strategy", "market": market}
+        return result
 
     @app.get("/api/v1/arena/tournament/{runner_id}")
     async def get_tournament_model(runner_id: str, lang: str = "en", refresh: bool = False):

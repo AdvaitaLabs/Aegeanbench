@@ -203,6 +203,49 @@ def _top_scorers(real_scorers: List[Dict[str, Any]], champion: Optional[str]) ->
 
 # ----------------------------- orchestrator -----------------------------
 
+def generate_team_probabilities(*, client, teams: List[str], lang: str = "en") -> Dict[str, Any]:
+    """
+    Per-team P(win the cup) and P(advance from group) — needed to compute
+    Polymarket edge on the outright (winner) and qualification markets,
+    which our single-bracket forecast can't provide. One LLM call; mock
+    fallback (deterministic) when client is None or it fails.
+    Returns {"champion": {team: prob}, "advance": {team: prob}}.
+    """
+    teams = [t for t in (teams or []) if t]
+    if not teams:
+        return {"champion": {}, "advance": {}}
+
+    champ: Dict[str, float] = {}
+    adv: Dict[str, float] = {}
+    if client is not None:
+        sys = ("只输出 JSON。" if lang.lower().startswith("zh") else "Output only JSON. ") + (
+            'For each team give champion_prob (win the whole World Cup) and '
+            'advance_prob (get out of the group). Return '
+            '{"teams":[{"team":"X","champion_prob":0.0-1.0,"advance_prob":0.0-1.0}]}. '
+            'champion_prob across all teams should sum to ~1.')
+        out = _llm_json(client, sys, "Teams:\n" + ", ".join(teams)) or {}
+        for r in out.get("teams", []) or []:
+            try:
+                champ[r["team"]] = float(r["champion_prob"])
+                adv[r["team"]] = float(r["advance_prob"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    if not champ:   # mock / failed -> deterministic seed by hash
+        for t in teams:
+            s = int(hashlib.sha256(t.encode()).hexdigest()[:6], 16)
+            champ[t] = (s % 50) + 1
+            adv[t] = 0.2 + (s % 60) / 100.0
+        total = sum(champ.values()) or 1.0
+        champ = {t: round(v / total, 4) for t, v in champ.items()}
+        adv = {t: round(min(0.95, v), 4) for t, v in adv.items()}
+    else:
+        total = sum(champ.values()) or 1.0
+        champ = {t: round(v / total, 4) for t, v in champ.items()}
+
+    return {"champion": champ, "advance": adv}
+
+
 def generate_forecast(*, client, real_state: Dict[str, Any], lang: str = "en") -> Dict[str, Any]:
     """Run the full segmented pipeline into a tournament-forecast dict."""
     # Work on a deep-ish copy of the groups so we don't mutate the shared seed.

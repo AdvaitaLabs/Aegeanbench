@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo \"=== AegeanBench ===\"; grep -rliE \"polymarket|\\\\bpoly\\\\b\" /Users/liudongqi/AegeanBench --include=\"*.py\" --include=\"*.md\" --include=\"*.yaml\" --include=\"*.yml\" 2>/dev/null | grep -v node_modules | head -20 *)",
+      "Read(//Users/liudongqi/loka-sim-mvp/**)",
+      "Bash(echo \"=== loka 里有没有 MarketSource 代码 ===\"; grep -rniE \"MarketSource|MarketCompare|class.*Market\" /Users/liudongqi/loka-sim-mvp --include=\"*.py\" --include=\"*.rs\" 2>/dev/null | head *)",
+      "Read(//Users/liudongqi/atoshi/**)",
+      "Bash(cd /Users/liudongqi/AegeanBench)",
+      "Bash(grep -n \"arena/matches/{match_id}\\\\|arena/tournament\\\\|def get_arena_match\\\\|def get_tournament\\\\|return payload$\\\\|_start_tournament_warmer\\\\|_start_arena_warmer\" aegeanbench/sports/reporter/server.py)",
+      "Bash(rm -rf /tmp/abtest_venv)",
+      "Bash(python3 -m venv /tmp/abtest_venv)",
+      "Bash(/tmp/abtest_venv/bin/pip install *)",
+      "Bash(/tmp/abtest_venv/bin/python -c \"import fastapi,yaml; print\\('DEPS_OK'\\)\")",
+      "Bash(unset OPENAI_API_KEY)",
+      "Bash(POLYMARKET_DISABLED=1 BENCHMARK_MODELS=gpt-5:GPT-5:0.15 LIVE_POLLER_DISABLED=1 PREMATCH_WARMER_DISABLED=1 ARENA_WARMER_DISABLED=1 TOURNAMENT_WARMER_DISABLED=1 /tmp/abtest_venv/bin/python -c ' *)",
+      "Bash(LIVE_POLLER_DISABLED=1 PREMATCH_WARMER_DISABLED=1 ARENA_WARMER_DISABLED=1 TOURNAMENT_WARMER_DISABLED=1 POLYMARKET_DISABLED=1 /tmp/abtest_venv/bin/python -m pytest tests/sports -q)"
+    ]
+  }
+}

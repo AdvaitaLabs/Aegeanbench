@@ -153,6 +153,20 @@ class TournamentService:
             "top_scorers": forecast.get("top_scorers", []) if ok else [],
         }
 
+    # ---------------- per-team probabilities (for strategy) ----------------
+
+    def team_probabilities(self, lang: str = "en", use_cache: bool = True) -> Dict[str, Any]:
+        """aegean's per-team champion%/advance% table, cached daily."""
+        key = f"_probs|{lang}"
+        if use_cache and key in self._cache and time.time() < self._cache[key][0]:
+            return self._cache[key][1]
+        state = self._real_state()
+        teams = [t for g in state.get("groups", []) for t in (g.get("teams") or [])]
+        client = self._client(os.getenv("OPENAI_MODEL", "claude-opus-4-6"))
+        probs = gen.generate_team_probabilities(client=client, teams=teams, lang=lang)
+        self._cache[key] = (time.time() + _FORECAST_TTL, probs)
+        return probs
+
     # ---------------- list (summaries) ----------------
 
     def list_models(self, lang: str = "en") -> Dict[str, Any]:
