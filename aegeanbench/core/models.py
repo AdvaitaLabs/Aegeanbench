@@ -27,6 +27,7 @@ class BenchmarkCategory(str, Enum):
     HYBRID        = "hybrid"
     RISK          = "risk"
     INVESTMENT    = "investment"
+    EVENT         = "event"        # scenario/event backtest (Loka multi-agent simulation)
 
 
 class Difficulty(str, Enum):
@@ -187,6 +188,61 @@ class InvestmentMetrics(BaseModel):
 
 
 # ─────────────────────────────────────────────
+# Event / Scenario backtest (Loka multi-agent simulation)
+# ─────────────────────────────────────────────
+
+class EventGroundTruth(BaseModel):
+    """
+    The realized real-world outcome for a scenario/event case — what actually
+    happened after the analysis date. Known at scoring time; never shown to the
+    model. `confidence` marks how trustworthy the number is:
+      "high"   = verified public fact, safe to demo as-is
+      "approx" = direction/magnitude right but the exact figure is from memory;
+                 verify against `source` before a client-facing demo.
+    """
+    direction_label: str            = "unknown"   # decline / delayed / negative_spike / up ...
+    actual_value:    Optional[float] = None        # realized numeric outcome, if any
+    unit:            Optional[str]   = None         # visitors / percent / usd / ...
+    narrative:       str            = ""            # what actually happened, in words
+    source:          str            = ""            # provenance (IRS 990 / official / ADX ...)
+    confidence:      str            = "approx"      # "high" | "approx"
+
+
+class EventPrediction(BaseModel):
+    """
+    Machine-readable prediction extracted from a Loka report — the payload
+    inside the report's ``AEGEANBENCH:PREDICTION`` block. Fields mirror what
+    Loka's ReportAgent emits (direction + point estimate + 80% CI + confidence).
+    """
+    direction:      Optional[str]         = None
+    point_estimate: Optional[float]       = None
+    unit:           Optional[str]         = None
+    ci_80:          Optional[List[float]] = None
+    confidence:     float                 = 0.0
+    rationale:      str                   = ""
+
+
+class EventMetrics(BaseModel):
+    """Per-case metrics for a scenario/event backtest."""
+    predicted_direction:    Optional[str]   = None
+    ground_truth_direction: str             = "unknown"
+    direction_correct:      bool            = False
+
+    predicted_value:        Optional[float] = None
+    actual_value:           Optional[float] = None
+    value_error_pct:        Optional[float] = None   # |pred-actual|/|actual| * 100
+    within_ci:              Optional[bool]  = None    # did the truth fall in the 80% CI?
+
+    case_score:             float           = 0.0     # 0..1 composite used for the gap
+
+    # Memorization gap — filled by the suite scorer when a real/anon twin pair
+    # is available. gap = real_score - anon_score. Small = genuine reasoning.
+    is_anonymized:          bool            = False
+    memorization_gap:       Optional[float] = None
+    gap_level:              Optional[str]   = None     # low (<=.05) / medium (<=.15) / high
+
+
+# ─────────────────────────────────────────────
 # Benchmark Case
 # ─────────────────────────────────────────────
 
@@ -221,6 +277,12 @@ class BenchmarkCase(BaseModel):
     investment_request: Optional[Dict[str, Any]] = None
     historical_context: Optional[HistoricalMarketContext] = None
     investment_ground_truth: Optional[InvestmentGroundTruth] = None
+
+    # Event / scenario backtest input (Loka)
+    scenario_request:    Optional[Dict[str, Any]]     = None   # {question, analysis_date, horizon, public_facts}
+    event_ground_truth:  Optional[EventGroundTruth]   = None
+    is_anonymized:       bool                         = False  # True = the anonymized twin
+    twin_case_id:        Optional[str]                = None   # links real <-> anon variants
 
     # Adversarial flags
     has_outlier_agent: bool          = False
@@ -261,6 +323,7 @@ class BenchmarkResult(BaseModel):
     collaboration_metrics: Optional[CollaborationMetrics] = None
     risk_metrics:          Optional[RiskMetrics]         = None
     investment_metrics:    Optional[InvestmentMetrics]   = None
+    event_metrics:         Optional[EventMetrics]        = None
 
     raw_output: Dict[str, Any] = Field(default_factory=dict)
     error:      Optional[str]  = None
@@ -345,6 +408,12 @@ class BenchmarkSuiteResult(BaseModel):
     investment_avg_excess_return_20d: float = 0.0
     investment_avg_max_drawdown_20d: float = 0.0
     investment_risk_gate_rate: float = 0.0
+
+    # Event / scenario (Loka)
+    event_direction_accuracy:    float = 0.0
+    event_within_ci_rate:        float = 0.0
+    event_mean_value_error_pct:  float = 0.0
+    event_mean_memorization_gap: float = 0.0
 
     # Per-result list
     results:   List[BenchmarkResult] = Field(default_factory=list)

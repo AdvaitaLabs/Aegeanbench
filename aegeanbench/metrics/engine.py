@@ -199,6 +199,41 @@ class MetricsEngine:
                 1 for r in investment_results if r.investment_metrics.risk_gate_triggered
             ) / n
 
+        # ── Event / scenario metrics (Loka) ──────────────────────
+        event_results = [
+            r for r in results
+            if r.category == BenchmarkCategory.EVENT and r.event_metrics is not None
+        ]
+
+        event_direction_accuracy = 0.0
+        event_within_ci_rate = 0.0
+        event_mean_value_error_pct = 0.0
+        event_mean_memorization_gap = 0.0
+
+        if event_results:
+            n = len(event_results)
+            event_direction_accuracy = sum(
+                1 for r in event_results if r.event_metrics.direction_correct
+            ) / n
+            # within-CI rate only over cases that had a numeric CI to score.
+            ci_scored = [r for r in event_results if r.event_metrics.within_ci is not None]
+            if ci_scored:
+                event_within_ci_rate = sum(
+                    1 for r in ci_scored if r.event_metrics.within_ci
+                ) / len(ci_scored)
+            err_scored = [r for r in event_results if r.event_metrics.value_error_pct is not None]
+            if err_scored:
+                event_mean_value_error_pct = sum(
+                    r.event_metrics.value_error_pct for r in err_scored
+                ) / len(err_scored)
+            # gap is set identically on both twins, so averaging over every
+            # result that has one still yields the mean per-pair gap.
+            gap_scored = [r for r in event_results if r.event_metrics.memorization_gap is not None]
+            if gap_scored:
+                event_mean_memorization_gap = sum(
+                    r.event_metrics.memorization_gap for r in gap_scored
+                ) / len(gap_scored)
+
         return BenchmarkSuiteResult(
             suite_id=suite_id,
             suite_name=suite_name,
@@ -244,6 +279,11 @@ class MetricsEngine:
             investment_avg_excess_return_20d=round(investment_avg_excess_return_20d, 4),
             investment_avg_max_drawdown_20d=round(investment_avg_max_drawdown_20d, 4),
             investment_risk_gate_rate=round(investment_risk_gate_rate, 4),
+            # event / scenario
+            event_direction_accuracy=round(event_direction_accuracy, 4),
+            event_within_ci_rate=round(event_within_ci_rate, 4),
+            event_mean_value_error_pct=round(event_mean_value_error_pct, 4),
+            event_mean_memorization_gap=round(event_mean_memorization_gap, 4),
             results=results,
         )
 
