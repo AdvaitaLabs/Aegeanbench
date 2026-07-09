@@ -563,10 +563,17 @@ def create_app(
         return {"_meta": {"endpoint": "GET /api/v1/arena/models"}, "models": arena_roster()}
 
     @app.get("/api/v1/arena/upcoming")
-    def get_arena_upcoming(lang: str = "en", hours: int = 72):
+    def get_arena_upcoming(lang: str = "en", hours: int = 240):
         """
         Upcoming matches with each model's cached prediction summary.
         Never computes — models not yet run show status="pending".
+
+        Window defaults to 240h (~10 days) so the whole remaining knockout
+        stage (all quarter-finals through the final) shows up, not just the
+        next day's fixtures. Matches beyond the warmer's T-24h/T-1h
+        pre-compute window will list as status="pending" until warmed;
+        clients can force an immediate prediction via
+        GET /api/v1/arena/matches/{match_id}.
         """
         return _arena_service().upcoming(lang=lang, hours=hours)
 

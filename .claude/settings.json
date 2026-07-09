@@ -13,7 +13,29 @@
       "Bash(/tmp/abtest_venv/bin/python -c \"import fastapi,yaml; print\\('DEPS_OK'\\)\")",
       "Bash(unset OPENAI_API_KEY)",
       "Bash(POLYMARKET_DISABLED=1 BENCHMARK_MODELS=gpt-5:GPT-5:0.15 LIVE_POLLER_DISABLED=1 PREMATCH_WARMER_DISABLED=1 ARENA_WARMER_DISABLED=1 TOURNAMENT_WARMER_DISABLED=1 /tmp/abtest_venv/bin/python -c ' *)",
-      "Bash(LIVE_POLLER_DISABLED=1 PREMATCH_WARMER_DISABLED=1 ARENA_WARMER_DISABLED=1 TOURNAMENT_WARMER_DISABLED=1 POLYMARKET_DISABLED=1 /tmp/abtest_venv/bin/python -m pytest tests/sports -q)"
+      "Bash(LIVE_POLLER_DISABLED=1 PREMATCH_WARMER_DISABLED=1 ARENA_WARMER_DISABLED=1 TOURNAMENT_WARMER_DISABLED=1 POLYMARKET_DISABLED=1 /tmp/abtest_venv/bin/python -m pytest tests/sports -q)",
+      "Read(//Users/liudongqi/lokaworld/**)",
+      "Bash(cd /Users/liudongqi/lokaworld && echo \"===BACKEND===\" && find backend -type f -not -path '*/node_modules/*' -not -path '*/__pycache__/*' | head -60 && echo \"===SRC===\" && find src -type f -not -path '*/node_modules/*' | head -40 && echo \"===DOCS===\" && find docs -type f | head -30)",
+      "Read(//Users/liudongqi/lokaworld/backend/app/services/**)",
+      "Bash(cd /Users/liudongqi/lokaworld && echo \"===DATA DIR===\" && ls -la src/data/ && echo \"===demo data files===\" && find src/data -type f | head)",
+      "Read(//Users/liudongqi/lokaworld/src/data/**)",
+      "Bash(cd /Users/liudongqi/lokaworld/backend/app/services && wc -l oasis_profile_generator.py simulation_config_generator.py simulation_runner.py simulation_manager.py stakeholder_expander.py ontology_generator.py 2>/dev/null && echo \"===grep group/cluster/segment 相关===\" && grep -rniE \"group|cluster|segment|cohort|faction|community\" *.py | grep -viE \"grouped_by|group by\" | head -40)",
+      "Bash(ls -la /Users/liudongqi/lokaworld/backend/app/services/)",
+      "Bash(wc -l /Users/liudongqi/lokaworld/backend/app/services/oasis_profile_generator.py /Users/liudongqi/lokaworld/backend/app/services/simulation_config_generator.py /Users/liudongqi/lokaworld/backend/app/services/simulation_runner.py /Users/liudongqi/lokaworld/backend/app/services/simulation_manager.py /Users/liudongqi/lokaworld/backend/app/services/stakeholder_expander.py 2>/dev/null)",
+      "Bash(grep -n -i -E \"group|cluster|segment|cohort|faction|category|role_type|profession|camp|community|社群|阵营|职业|角色类型\" /Users/liudongqi/lokaworld/backend/app/services/oasis_profile_generator.py)",
+      "Bash(grep -n -i -E \"round|step|activate|select|sample|\\\\.act\\\\\\(|action|interview|refresh|available_action|deregister|reset_agent|LLMAction|manual|env\\\\.step\" /Users/liudongqi/lokaworld/backend/app/services/simulation_runner.py | head -80)",
+      "Bash(grep -rn -i -E \"cmd\\\\s*=|subprocess|sys.executable|__main__|def run_oasis|oasis\\\\.|\\\\.step\\\\\\(|env\\\\.step|make_agents|ActionType|available_actions|refresh|recsys|interview|activate\" /Users/liudongqi/lokaworld/backend/app/services/simulation_runner.py | head -60)",
+      "Bash(grep -rn -i -E \"def run|\\\\.step\\\\\\(|env\\\\.step|activate|recsys|available_actions|make_agent|generate_agent|refresh|LLMAction|ManualAction|round|interview\" /Users/liudongqi/lokaworld/backend/ --include=*.py -l 2>/dev/null | grep -v services/simulation_runner | head -40)",
+      "Read(//Users/liudongqi/lokaworld/backend/**)",
+      "Bash(grep -n \"script_path\" /Users/liudongqi/lokaworld/backend/app/services/simulation_runner.py | head)",
+      "Bash(grep -rln -i -E \"env\\\\.step|\\\\.step\\\\\\(|available_actions|LLMAction|make_reddit|generate_reddit|activate\" /Users/liudongqi/lokaworld/backend/ 2>/dev/null | head -30)",
+      "Bash(grep -n \"SCRIPTS_DIR\\\\|script_name\" /Users/liudongqi/lokaworld/backend/app/services/simulation_runner.py | head; echo \"---\"; wc -l /Users/liudongqi/lokaworld/backend/scripts/run_reddit_simulation.py /Users/liudongqi/lokaworld/backend/scripts/run_twitter_simulation.py /Users/liudongqi/lokaworld/backend/scripts/run_parallel_simulation.py)",
+      "Read(//Users/liudongqi/lokaworld/backend/scripts/**)",
+      "Bash(grep -n -i -E \"env\\\\.step|\\\\.step\\\\\\(|available_actions|LLMAction|ManualAction|recsys|activate|round|interview|generate_reddit|make_agent|refresh_rec\" /Users/liudongqi/lokaworld/backend/scripts/run_reddit_simulation.py)",
+      "Bash(grep -n -i -E \"group|cluster|segment|cohort|faction|community|stakeholder|agent_config|activity_level|active_hours|relevan|topic|category|role\" /Users/liudongqi/lokaworld/backend/app/services/simulation_config_generator.py | head -60)",
+      "Bash(grep -rn -i -E \"relevance_weight|hot_topics|influence_weight\" /Users/liudongqi/lokaworld/backend/scripts/run_reddit_simulation.py /Users/liudongqi/lokaworld/backend/scripts/run_twitter_simulation.py /Users/liudongqi/lokaworld/backend/scripts/run_parallel_simulation.py)",
+      "Bash(grep -n -i -E \"_get_active_agents_for_round|active_hours|activity_level|random.sample|LLMAction|def run|round_num|relevance|hot_topic|group|stakeholder\" /Users/liudongqi/lokaworld/backend/scripts/run_parallel_simulation.py | head -40)",
+      "Bash(grep -n -i -E \"def |group|stakeholder|select|sample|activate|round|subset|relevan|filter\" /Users/liudongqi/lokaworld/backend/app/services/simulation_manager.py | head -40)"
     ]
   }
 }

@@ -35,11 +35,19 @@ logger = logging.getLogger(__name__)
 
 # Minimum gap between consecutive consensus runs for the same match.
 MIN_RECONSENSUS_SECONDS = 300   # 5 minutes
-# Pre-match warm checkpoints (feature A): an early snapshot a day out and
-# a final refresh ~1h before kickoff once lineups/odds firm up. The
-# background warmer pre-computes consensus at each so users get instant
-# cached reads before the match.
-PRE_MATCH_CHECKPOINTS_HOURS = (24.0, 1.0)   # T-24h and T-1h
+# Pre-match warm checkpoints (feature A): the background warmer pre-computes
+# consensus at each checkpoint so users get instant cached reads (not
+# "pending") well ahead of kickoff, with progressive refreshes as odds and
+# lineups firm up. Each checkpoint fires at most once per match.
+#   T-72h/48h : early snapshots so the fixture shows a real prediction days
+#               out (fixes knockout matches sitting on "pending").
+#   T-24h     : day-before refresh.
+#   T-6h/1h   : late refreshes once lineups/odds are locked — the
+#               data-grounded aegean consensus gains the most here.
+# Cost note: N checkpoints ≈ N× the per-match pre-compute spend. Fine for the
+# knockout stage (few matches); for a full 104-match tournament, consider
+# refreshing only the aegean model at the later checkpoints.
+PRE_MATCH_CHECKPOINTS_HOURS = (72.0, 48.0, 24.0, 6.0, 1.0)
 
 # Soft chat-heat triggers (only fire when nothing else has lately).
 CHAT_HEAT_MIN_MESSAGES = 30
@@ -201,20 +209,35 @@ class MatchEventScheduler:
 
         fired = self._fired_pre_match.setdefault(match_id, set())
 
-        for hours in PRE_MATCH_CHECKPOINTS_HOURS:
-            window_lo = hours * 3600 - 60     # 60-second window around the checkpoint
-            window_hi = hours * 3600 + 60
-            if window_lo <= seconds_to_kickoff <= window_hi and hours not in fired:
-                fired.add(hours)
-                self._last_run_at[match_id] = now
-                return ConsensusTrigger(
-                    match_id=match_id,
-                    reason=TriggerReason.PRE_MATCH_SCHEDULED,
-                    triggered_at=now,
-                    priority=4,
-                    detail=f"T-{hours}h checkpoint",
-                )
-        return None
+        # Catch-up firing (instead of a narrow ±60s window around each
+        # checkpoint): fire the most-recent checkpoint we've already reached.
+        # Why: the old ±60s window meant a server restart or a missed tick
+        # skipped a checkpoint *forever*, leaving the fixture stuck on
+        # "pending". The arena cache is in-memory, so every redeploy wiped it
+        # and — with the old logic — nothing recomputed until each match next
+        # happened to cross an exact checkpoint minute. With catch-up, the
+        # warmer's first tick after a deploy warms every in-range fixture
+        # immediately.
+        reached = [h for h in PRE_MATCH_CHECKPOINTS_HOURS
+                   if seconds_to_kickoff <= h * 3600 + 60]
+        if not reached:
+            return None   # earlier than the first checkpoint — too soon to warm
+        current = min(reached)      # the checkpoint closest to kickoff
+        if current in fired:
+            return None
+        # Mark every reached checkpoint fired so booting late doesn't also
+        # re-fire the older ones we skipped past (e.g. starting at T-50h fires
+        # T-72h once, not T-72h *and* T-48h).
+        for h in reached:
+            fired.add(h)
+        self._last_run_at[match_id] = now
+        return ConsensusTrigger(
+            match_id=match_id,
+            reason=TriggerReason.PRE_MATCH_SCHEDULED,
+            triggered_at=now,
+            priority=4,
+            detail=f"T-{current}h checkpoint",
+        )
 
     def manual_trigger(self, match_id: str, detail: str = "") -> ConsensusTrigger:
         """Operator override - always fires regardless of throttle."""

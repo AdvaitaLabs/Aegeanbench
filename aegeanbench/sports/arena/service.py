@@ -32,7 +32,13 @@ logger = logging.getLogger(__name__)
 
 _AEGEAN_RUNNER_ID = "aegean-consensus"
 _AEGEAN_DISPLAY = "Aegean Consensus"
-_CACHE_TTL = 6 * 3600.0     # pre-match predictions stay fresh 6h
+# Must be >= the largest gap between PRE_MATCH_CHECKPOINTS_HOURS (currently
+# 24h, between the 72h/48h/24h checkpoints). Otherwise a warmed prediction
+# expires before the next checkpoint re-warms it, and /arena/upcoming drops
+# back to "pending" in between — defeating the early checkpoints. 25h keeps
+# the cache continuously populated from the first warm through kickoff; each
+# checkpoint overwrites it with a fresher (use_cache=False) recompute.
+_CACHE_TTL = 25 * 3600.0    # pre-match predictions stay fresh 25h (>= max checkpoint gap)
 _COMPETITION = "FIFA World Cup 2026"
 
 
@@ -196,7 +202,7 @@ class ArenaService:
 
     # ---------------- upcoming (cache-only) ----------------
 
-    def upcoming(self, *, lang: str = "en", hours: int = 72) -> Dict[str, Any]:
+    def upcoming(self, *, lang: str = "en", hours: int = 240) -> Dict[str, Any]:
         """
         List upcoming fixtures with whatever is already cached. Never
         computes (cost-safe) — uncomputed models show status="pending".
