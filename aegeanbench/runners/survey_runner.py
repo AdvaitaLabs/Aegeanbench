@@ -136,9 +136,17 @@ class SurveyRunner:
         req = case.scenario_request or {}
         pop_id = f"bench-{case.case_id}"
 
-        build = requests.post(f"{self.base_url}/api/population/build", timeout=self.timeout_s,
-                              json={"marginals": req["marginals"], "size": req.get("size", 1000),
-                                    "geo_id": req.get("geo_id"), "population_id": pop_id})
+        # Electoral / multi-geo cases build one sub-population per GeoScope leaf.
+        if req.get("geo") and req.get("unit_marginals"):
+            build = requests.post(f"{self.base_url}/api/population/build-geo", timeout=self.timeout_s,
+                                  json={"geo": req["geo"], "unit_marginals": req["unit_marginals"],
+                                        "sizes": req.get("sizes"),
+                                        "default_size": req.get("default_size", 500),
+                                        "population_id": pop_id, "async": False})
+        else:
+            build = requests.post(f"{self.base_url}/api/population/build", timeout=self.timeout_s,
+                                  json={"marginals": req["marginals"], "size": req.get("size", 1000),
+                                        "geo_id": req.get("geo_id"), "population_id": pop_id})
         build.raise_for_status()
 
         run = requests.post(f"{self.base_url}/api/survey/run", timeout=self.timeout_s,
