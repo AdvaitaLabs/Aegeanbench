@@ -331,6 +331,11 @@ def predict_lokaworld_deep(case, confirm_structure=False):
         raise RuntimeError("no AEGEANBENCH prediction block in the deep report — "
                            "start Loka with LOKA_EMIT_PREDICTION=true")
     direction = _norm_dir(case, ep0.direction, ep0.point_estimate)
+    if direction is None:
+        # zh reports sometimes phrase the binary verdict outside the direction
+        # token — scan the block's own rationale before scoring a miss
+        direction = _norm_dir(case, f"{ep0.direction or ''} {ep0.rationale or ''}",
+                              ep0.point_estimate)
     ep = EventPrediction(direction=direction, point_estimate=ep0.point_estimate,
                          unit=ep0.unit, ci_80=ep0.ci_80,
                          confidence=ep0.confidence, rationale=ep0.rationale)
