@@ -42,8 +42,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aegeanbench.core.models import EventGroundTruth, EventPrediction  # noqa: E402
-from aegeanbench.scoring import (calibrate_confidence, fit_confidence_table,  # noqa: E402
-                                 score_prediction)
+from aegeanbench.scoring import (calibrate_confidence, extract_prediction,  # noqa: E402
+                                 fit_confidence_table, score_prediction)
 
 LOKA_URL = os.environ.get("LOKA_URL", "http://localhost:5003").rstrip("/")
 LLM_BASE = os.environ.get("LLM_BASE_URL", "https://praka.ai/v1").rstrip("/")
@@ -52,6 +52,9 @@ MODELS = [m.strip().split(":")[0] for m in
           os.environ.get("BENCHMARK_MODELS", "gpt-5.4,claude-opus-4-6,grok-4.3-fast").split(",")
           if m.strip()]
 RESULTS = Path(__file__).resolve().parent.parent / "results"
+# Competitor id for the Loka entry — override for A/B runs so the history and
+# leaderboard keep the variants apart (e.g. lokaworld-deep, lokaworld-deep-struct).
+LOKA_ID = os.environ.get("BENCHMARK_LOKA_ID", "lokaworld")
 
 
 # ── the 4 real cross-angle cases (mirror the frontend page) ─────────────────
@@ -219,6 +222,79 @@ def predict_lokaworld(case):
     return ep, report
 
 
+def predict_lokaworld_deep(case, confirm_structure=False):
+    """Score the REAL product: the full OASIS deep pipeline via the workflow
+    API. The Loka server MUST run with LOKA_EMIT_PREDICTION=true (adds the
+    machine-readable block to the report) and SHOULD run with
+    LOKA_BENCHMARK_NO_LEAK=true (blocks live web search) for honest backtests.
+    Slow: 10-30 min per case. `confirm_structure=True` first fetches the
+    step-0 classification + proposed hierarchy/axes and passes them into the
+    run — the A/B lever for "does structure confirmation improve accuracy?".
+    Tunables: BENCHMARK_DEEP_AGENTS (150), BENCHMARK_DEEP_ROUNDS (10),
+    BENCHMARK_DEEP_TIMEOUT (3600s)."""
+    import time as _t
+    import requests
+    topic_analysis = None
+    if confirm_structure:
+        d = ((_post_retry(f"{LOKA_URL}/api/workflow/analyze-topic",
+                          json={"question": case["question"]}, timeout=300)
+              .json() or {}).get("data")) or {}
+        if d.get("structure") or d.get("axes"):
+            topic_analysis = {"angle": d.get("angle"), "suggested_angle": d.get("angle"),
+                              "summary": d.get("summary"), "marginals": d.get("marginals"),
+                              "structure": d.get("structure"), "axes": d.get("axes")}
+    body = {"question": case["question"],
+            "agent_count": int(os.environ.get("BENCHMARK_DEEP_AGENTS", "150")),
+            "max_rounds": int(os.environ.get("BENCHMARK_DEEP_ROUNDS", "10"))}
+    if topic_analysis:
+        body["topic_analysis"] = topic_analysis
+    dag = ((_post_retry(f"{LOKA_URL}/api/workflow/plan", json=body, timeout=600)
+            .json() or {}).get("data")) or {}
+    run = ((_post_retry(f"{LOKA_URL}/api/workflow/run",
+                        json={"workflow_id": dag.get("workflow_id"), "dag": dag},
+                        timeout=60).json() or {}).get("data")) or {}
+    run_id = run.get("run_id")
+    if not run_id:
+        raise RuntimeError(f"deep run did not start: {run}")
+    deadline = _t.time() + float(os.environ.get("BENCHMARK_DEEP_TIMEOUT", "3600"))
+    project_id = None
+    while _t.time() < deadline:
+        st = ((requests.get(f"{LOKA_URL}/api/workflow/run/{run_id}/status", timeout=30)
+               .json() or {}).get("data")) or {}
+        status = st.get("status")
+        if status == "completed":
+            project_id = st.get("project_id")
+            break
+        if status in ("failed", "cancelled", "interrupted"):
+            raise RuntimeError(f"deep run {run_id} {status}: {st.get('error')}")
+        _t.sleep(15)
+    if not project_id:
+        raise TimeoutError(f"deep run {run_id} timed out")
+    resp = requests.get(f"{LOKA_URL}/api/project/{project_id}/report_md", timeout=60)
+    md = resp.text
+    try:
+        j = resp.json()
+        md = ((j.get("data") or {}).get("markdown")
+              or (j.get("data") or {}).get("report_md")
+              or j.get("report_md") or md)
+    except ValueError:
+        pass
+    ep0 = extract_prediction(md)
+    if ep0 is None:
+        raise RuntimeError("no AEGEANBENCH prediction block in the deep report — "
+                           "start Loka with LOKA_EMIT_PREDICTION=true")
+    direction = _norm_dir(case, ep0.direction, ep0.point_estimate)
+    ep = EventPrediction(direction=direction, point_estimate=ep0.point_estimate,
+                         unit=ep0.unit, ci_80=ep0.ci_80,
+                         confidence=ep0.confidence, rationale=ep0.rationale)
+    report = {"method": (f"Deep OASIS simulation ({body['agent_count']} agents x "
+                         f"{body['max_rounds']} rounds) -> consulting report"
+                         + (" · confirmed structure" if topic_analysis else "")),
+              "summary": (ep0.rationale or md[:600]),
+              "angles": []}
+    return ep, report
+
+
 # ── competitor 2: raw frontier model, single-shot ───────────────────────────
 _RAW_SYS = ("You are a rigorous forecasting analyst. Use ONLY information available on or before the "
             "analysis date; do not use facts that happened afterward. Respond with strict JSON only, "
@@ -302,7 +378,13 @@ def _dry_predict(case, comp):
 def main():
     emit_js = "--emit-js" in sys.argv
     dry = "--dry" in sys.argv
-    competitors = ["lokaworld"] + MODELS
+    # --deep: score the REAL deep pipeline instead of the panel harness.
+    # --confirm-structure: (deep only) pass the step-0 hierarchy/axes into the
+    # run — run the suite once with and once without (different
+    # BENCHMARK_LOKA_ID) for the structure A/B.
+    deep = "--deep" in sys.argv
+    confirm_structure = "--confirm-structure" in sys.argv
+    competitors = [LOKA_ID] + MODELS
     RESULTS.mkdir(exist_ok=True)
     per_case, scored = [], {c: [] for c in competitors}
 
@@ -317,8 +399,9 @@ def main():
             try:
                 if dry:
                     ep, report = _dry_predict(case, comp)
-                elif comp == "lokaworld":
-                    ep, report = predict_lokaworld(case)
+                elif comp == LOKA_ID:
+                    ep, report = (predict_lokaworld_deep(case, confirm_structure)
+                                  if deep else predict_lokaworld(case))
                 else:
                     ep, report = predict_raw_model(case, comp)
                 err = None
@@ -481,7 +564,7 @@ export const BENCHMARK_SUMMARY = (() => {
     content = ("// AUTO-GENERATED by scripts/run_benchmark_arena.py — real arena results.\n"
                "// Complete drop-in for lokaworld/src/data/benchmark.js.\n"
                "export const COMPETITORS = [\n"
-               "  { id: 'lokaworld', name: 'LokaWorld', kind: 'agent', tagline: 'Multi-agent simulation' },\n"
+               f"  {{ id: {json.dumps(LOKA_ID)}, name: 'LokaWorld', kind: 'agent', tagline: 'Multi-agent simulation' }},\n"
                + "".join(f"  {{ id: {json.dumps(m)}, name: {json.dumps(name_map.get(m, m))}, kind: 'model' }},\n" for m in MODELS)
                + "];\n\nexport const BENCHMARK = [\n" + ",\n".join(cases_js) + "\n];\n" + tail)
     (RESULTS / "benchmark.generated.js").write_text(content, encoding="utf-8")
