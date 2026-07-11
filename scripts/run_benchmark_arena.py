@@ -241,7 +241,8 @@ def predict_lokaworld_deep(case, confirm_structure=False):
     topic_analysis = None
     if confirm_structure:
         d = ((_post_retry(f"{LOKA_URL}/api/workflow/analyze-topic",
-                          json={"question": case["question"]}, timeout=300)
+                          json={"question": case["question"]},
+                          headers={"Accept-Language": "en"}, timeout=300)
               .json() or {}).get("data")) or {}
         if d.get("structure") or d.get("axes"):
             topic_analysis = {"angle": d.get("angle"), "suggested_angle": d.get("angle"),
@@ -252,16 +253,20 @@ def predict_lokaworld_deep(case, confirm_structure=False):
             "max_rounds": int(os.environ.get("BENCHMARK_DEEP_ROUNDS", "10"))}
     if topic_analysis:
         body["topic_analysis"] = topic_analysis
-    dag = ((_post_retry(f"{LOKA_URL}/api/workflow/plan", json=body, timeout=600)
+    dag = ((_post_retry(f"{LOKA_URL}/api/workflow/plan", json=body,
+                        headers={"Accept-Language": "en"}, timeout=600)
             .json() or {}).get("data")) or {}
 
     # Start the run — self-healing against the one-active-run-per-owner gate:
     # a 429 means a previous run (often an orphan from a Ctrl-C'd script) is
     # still blocking this owner. Cancel it, wait for it to die, retry once.
     def _start_run():
+        # Accept-Language: en → the whole run (status messages, report
+        # sections, prediction-block rationale) comes out in English, so the
+        # benchmark page isn't a zh/en patchwork.
         return requests.post(f"{LOKA_URL}/api/workflow/run",
                              json={"workflow_id": dag.get("workflow_id"), "dag": dag},
-                             timeout=60)
+                             headers={"Accept-Language": "en"}, timeout=60)
     r = _start_run()
     if r.status_code == 429:
         try:
@@ -339,11 +344,30 @@ def predict_lokaworld_deep(case, confirm_structure=False):
     ep = EventPrediction(direction=direction, point_estimate=ep0.point_estimate,
                          unit=ep0.unit, ci_80=ep0.ci_80,
                          confidence=ep0.confidence, rationale=ep0.rationale)
+    # Carve the FULL consulting report into sections for the frontend modal —
+    # earlier this threw the 6-section report away and shipped one sentence,
+    # which made a 20-minute simulation look like a fortune cookie.
+    import re as _re
+    sections = []
+    for sec in _re.split(r"\n(?=##\s)", md):
+        m2 = _re.match(r"##\s*(.+)", sec)
+        if not m2:
+            continue
+        title = m2.group(1).strip()[:90]
+        bodytxt = sec[m2.end():]
+        bodytxt = _re.sub(r"<!--.*?-->", "", bodytxt, flags=_re.DOTALL)
+        bodytxt = _re.sub(r"[#*`>|]+", "", bodytxt)      # light de-markdown
+        bodytxt = _re.sub(r"\n{2,}", "\n\n", bodytxt).strip()
+        if bodytxt:
+            sections.append({"name": title, "text": bodytxt[:2200]})
+    exec_txt = next((a["text"] for a in sections
+                     if "summary" in a["name"].lower() or "执行摘要" in a["name"]), "")
     report = {"method": (f"Deep OASIS simulation ({body['agent_count']} agents x "
                          f"{body['max_rounds']} rounds) -> consulting report"
                          + (" · confirmed structure" if topic_analysis else "")),
-              "summary": (ep0.rationale or md[:600]),
-              "angles": []}
+              "summary": exec_txt or ep0.rationale or md[:600],
+              "rationale": ep0.rationale or "",
+              "angles": sections[:8]}
     return ep, report
 
 
