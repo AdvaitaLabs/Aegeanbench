@@ -197,6 +197,10 @@ def predict_lokaworld(case):
         "keyFindings": data.get("key_findings") or [],
         "crossCutting": data.get("cross_cutting") or "",
         "rationale": pred.get("rationale") or "",
+        # the shared fact sheet every department received — kept for the
+        # process view AND for post-mortems: when a run misses, the first
+        # suspect is a bad anchor in here.
+        "factSheet": data.get("fact_sheet") or "",
         # full per-department structure — the frontend renders these both as the
         # report's angle sections and as the "simulation process" replay.
         "angles": [{
