@@ -250,9 +250,42 @@ def predict_lokaworld_deep(case, confirm_structure=False):
         body["topic_analysis"] = topic_analysis
     dag = ((_post_retry(f"{LOKA_URL}/api/workflow/plan", json=body, timeout=600)
             .json() or {}).get("data")) or {}
-    run = ((_post_retry(f"{LOKA_URL}/api/workflow/run",
-                        json={"workflow_id": dag.get("workflow_id"), "dag": dag},
-                        timeout=60).json() or {}).get("data")) or {}
+
+    # Start the run — self-healing against the one-active-run-per-owner gate:
+    # a 429 means a previous run (often an orphan from a Ctrl-C'd script) is
+    # still blocking this owner. Cancel it, wait for it to die, retry once.
+    def _start_run():
+        return requests.post(f"{LOKA_URL}/api/workflow/run",
+                             json={"workflow_id": dag.get("workflow_id"), "dag": dag},
+                             timeout=60)
+    r = _start_run()
+    if r.status_code == 429:
+        try:
+            blocker = (r.json() or {}).get("active_run_id")
+        except ValueError:
+            blocker = None
+        print(f"    [deep] owner busy (active run {blocker or '?'}) — "
+              f"cancelling it and retrying", flush=True)
+        if blocker:
+            try:
+                requests.post(f"{LOKA_URL}/api/workflow/run/{blocker}/cancel", timeout=30)
+            except Exception:
+                pass
+            _end = _t.time() + 240
+            _live = ("running", "queued", "planning",
+                     "awaiting_decision", "awaiting_community")
+            while _t.time() < _end:
+                try:
+                    stb = ((requests.get(f"{LOKA_URL}/api/workflow/run/{blocker}/status",
+                                         timeout=30).json() or {}).get("data")) or {}
+                except Exception:
+                    break
+                if stb.get("status") not in _live:
+                    break
+                _t.sleep(10)
+        r = _start_run()
+    r.raise_for_status()
+    run = (r.json() or {}).get("data") or {}
     run_id = run.get("run_id")
     if not run_id:
         raise RuntimeError(f"deep run did not start: {run}")
