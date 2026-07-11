@@ -14,6 +14,8 @@ from aegeanbench.scoring.calibration import (
     stratified,
     record_from_summary,
     calibration_report,
+    fit_confidence_table,
+    calibrate_confidence,
 )
 
 __all__ = [
@@ -28,4 +30,6 @@ __all__ = [
     "stratified",
     "record_from_summary",
     "calibration_report",
+    "fit_confidence_table",
+    "calibrate_confidence",
 ]

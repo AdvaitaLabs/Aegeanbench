@@ -99,6 +99,61 @@ def record_from_summary(summary: Dict[str, Any], qid: str, actual: str,
     return ForecastRecord(distribution=dist, actual=actual, stratum=stratum)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Competitor confidence calibration (live arena)
+# ─────────────────────────────────────────────────────────────────────────
+# An LLM's self-reported confidence (0.68, 0.72, …) is a guess, not a
+# probability. Once the arena has accumulated enough (confidence, correct)
+# pairs per competitor, we can replace the raw number with the observed hit
+# rate of that competitor's confidence bin — Laplace-smoothed so small samples
+# shrink toward 0.5 instead of screaming 0% or 100%.
+
+CONF_BINS = [(0.0, 0.55), (0.55, 0.70), (0.70, 0.85), (0.85, 1.01)]
+
+
+def fit_confidence_table(history: List[Dict[str, Any]],
+                         min_samples: int = 8) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    history rows: {"competitor", "confidence", "correct"} (extra keys ignored).
+    Returns {competitor: [{lo, hi, n, observed}]} — only for competitors with
+    at least `min_samples` usable rows. observed = (hits+1)/(n+2) per bin.
+    """
+    by_comp: Dict[str, List[Dict[str, Any]]] = {}
+    for row in history:
+        comp, conf = row.get("competitor"), row.get("confidence")
+        if not comp or not isinstance(conf, (int, float)):
+            continue
+        by_comp.setdefault(comp, []).append(row)
+
+    tables: Dict[str, List[Dict[str, Any]]] = {}
+    for comp, rows in by_comp.items():
+        if len(rows) < min_samples:
+            continue
+        bins = []
+        for lo, hi in CONF_BINS:
+            hit = n = 0
+            for r in rows:
+                if lo <= float(r["confidence"]) < hi:
+                    n += 1
+                    hit += 1 if r.get("correct") else 0
+            bins.append({"lo": lo, "hi": hi, "n": n,
+                         "observed": round((hit + 1) / (n + 2), 4)})
+        tables[comp] = bins
+    return tables
+
+
+def calibrate_confidence(tables: Dict[str, List[Dict[str, Any]]],
+                         competitor: str, confidence: Optional[float]) -> Optional[float]:
+    """Raw self-reported confidence → observed accuracy of its bin, or None
+    when the competitor has no fitted table / the bin is empty."""
+    if confidence is None:
+        return None
+    for b in tables.get(competitor) or []:
+        if b["lo"] <= float(confidence) < b["hi"]:
+            return b["observed"] if b["n"] > 0 else None
+    return None
+
+
 def calibration_report(records: List[ForecastRecord]) -> Dict[str, Any]:
     """One-shot bundle. `worst_stratum` = lowest-accuracy segment for triage."""
     strat = stratified(records)
