@@ -448,11 +448,19 @@ def main():
     #            methodology demos)
     twins = "--twins" in sys.argv
     use_real = "--real" in sys.argv
+    # --cases=ID1,ID2 — rerun only these cases (e.g. the ones a flaky upstream
+    # killed); results for the untouched cases are merged in from the previous
+    # results/arena_live.json so --emit-js still produces the COMPLETE drop-in.
+    case_filter = None
+    for _a in sys.argv:
+        if _a.startswith("--cases="):
+            case_filter = {c.strip() for c in _a.split("=", 1)[1].split(",") if c.strip()}
+    run_cases = [c for c in CASES if not case_filter or c["id"] in case_filter]
     competitors = [LOKA_ID] + MODELS
     RESULTS.mkdir(exist_ok=True)
     per_case, scored = [], {c: [] for c in competitors}
 
-    for case in CASES:
+    for case in run_cases:
         gt = _gt(case)
         # the question competitors actually receive
         qcase = case if (use_real or twins) else _anon_case(case)
@@ -548,6 +556,21 @@ def main():
                                         "confidence": e["confidence"],
                                         "correct": bool(e["correct"])},
                                        ensure_ascii=False) + "\n")
+    # merge untouched cases from the previous run so partial reruns still
+    # yield a complete result set (order follows CASES)
+    if case_filter and (RESULTS / "arena_live.json").exists():
+        try:
+            prev_rows = {r["case_id"]: r for r in
+                         json.loads((RESULTS / "arena_live.json").read_text(encoding="utf-8"))
+                         .get("per_case", [])}
+            fresh = {r["case_id"]: r for r in per_case}
+            per_case = [fresh.get(c["id"]) or prev_rows.get(c["id"])
+                        for c in CASES]
+            per_case = [r for r in per_case if r]
+            print(f"(merged {len(per_case) - len(fresh)} case(s) from previous results)")
+        except Exception as me:  # noqa: BLE001
+            print(f"(merge with previous results failed: {me})")
+
     cal_history = []
     if history_path.exists():
         for line in history_path.read_text(encoding="utf-8").splitlines():
@@ -572,14 +595,13 @@ def main():
 
     leaderboard = []
     for comp in competitors:
-        ms = scored[comp]
-        n = len(ms) or 1
-        correct = sum(1 for x in ms if (x.direction_correct if x.actual_value is None
-                                        else (x.value_error_pct is not None and x.value_error_pct <= 15)))
-        errs = [x.value_error_pct for x in ms if x.value_error_pct is not None]
-        cis = [x for x in ms if x.within_ci is not None]
-        ci_hit = sum(1 for x in cis if x.within_ci)
-        leaderboard.append({"competitor": comp, "n": len(ms), "correct": correct,
+        rows = [r["entries"].get(comp) for r in per_case if r["entries"].get(comp)]
+        n = len(rows) or 1
+        correct = sum(1 for e in rows if e.get("correct"))
+        errs = [e["errPct"] for e in rows if e.get("errPct") is not None]
+        cis = [e for e in rows if e.get("within") is not None]
+        ci_hit = sum(1 for e in cis if e.get("within"))
+        leaderboard.append({"competitor": comp, "n": len(rows), "correct": correct,
                             "accuracy": round(correct / n * 100),
                             "median_error_pct": _median(errs),
                             "ci_hit": ci_hit, "ci_total": len(cis),
