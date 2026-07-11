@@ -257,11 +257,21 @@ def predict_lokaworld_deep(case, confirm_structure=False):
     if not run_id:
         raise RuntimeError(f"deep run did not start: {run}")
     deadline = _t.time() + float(os.environ.get("BENCHMARK_DEEP_TIMEOUT", "3600"))
+    print(f"    [deep] run {run_id} started — a full OASIS simulation takes "
+          f"10-30 min; progress prints below (Ctrl-C only kills THIS script, "
+          f"the Loka run keeps going server-side)", flush=True)
     project_id = None
+    _last = ""
     while _t.time() < deadline:
         st = ((requests.get(f"{LOKA_URL}/api/workflow/run/{run_id}/status", timeout=30)
                .json() or {}).get("data")) or {}
         status = st.get("status")
+        line = (f"[deep] {status} {st.get('progress', 0)}% · "
+                f"{st.get('current_node_id') or ''} — "
+                f"{(st.get('message') or '')[:90]}")
+        if line != _last:
+            print(f"    {line}", flush=True)
+            _last = line
         if status == "completed":
             project_id = st.get("project_id")
             break
