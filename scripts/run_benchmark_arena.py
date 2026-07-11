@@ -65,6 +65,7 @@ CASES = [
         "id": "WC-QATAR-2022", "entity": "Qatar · FIFA World Cup 2022",
         "tag": "Mega-event · government", "angle": "government",
         "asOf": "2022-06-01", "horizon": "~6 mo", "type": "range", "unit": "k",
+        "anon_question": "As of 6 months before kickoff: a small, wealthy Gulf monarchy (population ~2.9M, ~30k hotel rooms plus cruise-ship and fan-village capacity, ~$200B spent on a decade of infrastructure) hosts the world's biggest football tournament — 64 matches over 4 weeks in Nov-Dec, ~3M tickets issued, strong shuttle-flight links to neighboring states. Forecast international visitors during the tournament window, in thousands, and the net national impact.",
         "question": "As of the analysis date 2022-06-01 (before kickoff), forecast how many "
                     "international visitors Qatar will draw during the 2022 World Cup window "
                     "(Nov 20 – Dec 18), in thousands, and the net national impact.",
@@ -80,6 +81,7 @@ CASES = [
         "id": "CLIM-BC-CTAX-2008", "entity": "British Columbia · Carbon Tax (2008)",
         "tag": "Climate policy · government", "angle": "government",
         "asOf": "2008-07-01", "horizon": "~5 yr", "type": "range", "unit": "%",
+        "anon_question": "A western province of a large developed federation enacts the continent's first revenue-neutral carbon tax in mid-2008: starting ~$10/tonne, rising $5/yr to $30/tonne, all revenue returned via income-tax cuts. The province is highly urbanized with decent transit alternatives. Forecast the change ~5 years later in the province's per-capita fuel use relative to the rest of the federation (percent; a fall is negative), and whether provincial GDP is hurt.",
         "question": "As of 2008-07-01 (carbon tax just enacted), forecast the change ~5 years later "
                     "in British Columbia's per-capita fuel use relative to the rest of Canada "
                     "(percent; a fall is negative), and whether GDP is hurt.",
@@ -98,6 +100,7 @@ CASES = [
         "tag": "Insurance · market reaction", "angle": "company",
         "asOf": "2022-06-01", "horizon": "~24 mo", "type": "match",
         "options": ["Insurers retreat", "Market stays stable"],
+        "anon_question": 'As of mid-2022: a large, wealthy coastal state (a top-5 economy if it were a country) faces years of record wildfire losses; its insurance regulator must approve every rate increase and forbids forward-looking catastrophe models in pricing, so premiums lag true risk. Reinsurance costs are surging. Within ~24 months, will major home insurers retreat from the state, or does the market stay stable? Choose one: Insurers retreat / Market stays stable.',
         "question": "As of 2022-06-01, as wildfire and climate losses mount, will major home insurers "
                     "retreat from California? Choose one: Insurers retreat / Market stays stable.",
         "gt": {"direction_label": "retreat", "actual_value": None, "unit": None,
@@ -116,6 +119,7 @@ CASES = [
         "tag": "Sovereign fund · IPO", "angle": "market",
         "asOf": "2017-12-13", "horizon": "3–12 mo", "type": "match",
         "options": ["Up", "Down"],
+        "anon_question": "December 2017: a Gulf state's national oil company lists its fuel-distribution retail subsidiary — the dominant nationwide station network — at a fixed offer price. The IPO is ~22x oversubscribed, the company pledges a high stable dividend payout, oil prices are recovering, and quality listings are scarce on the local exchange. Up or down versus the offer price over the first 3-12 months? Choose one: Up / Down.",
         "question": "As of 2017-12-13, the state fuel-distribution subsidiary IPOs at AED 2.50 — up or "
                     "down over the first 3–12 months versus the offer price? Choose one: Up / Down.",
         "gt": {"direction_label": "up", "actual_value": None, "unit": None,
@@ -392,6 +396,15 @@ def predict_raw_model(case, model_id):
     return ep, report
 
 
+def _anon_case(case):
+    """The case with its memorization-proof twin question (names scrubbed,
+    every number and constraint preserved). A competitor that aces the real
+    case but flunks the twin was reciting, not reasoning."""
+    c2 = dict(case)
+    c2["question"] = case["anon_question"]
+    return c2
+
+
 def _median(xs):
     s = sorted(x for x in xs if x is not None)
     if not s:
@@ -427,30 +440,71 @@ def main():
     # BENCHMARK_LOKA_ID) for the structure A/B.
     deep = "--deep" in sys.argv
     confirm_structure = "--confirm-structure" in sys.argv
+    # DEFAULT: every competitor answers the ANONYMIZED question only —
+    # identifying names scrubbed, all numbers/constraints preserved — so a
+    # famous historical outcome cannot simply be recited from training data.
+    #   --real   ask the original named questions instead (legacy mode)
+    #   --twins  ask BOTH and compute the memorization gap (2x cost;
+    #            methodology demos)
+    twins = "--twins" in sys.argv
+    use_real = "--real" in sys.argv
     competitors = [LOKA_ID] + MODELS
     RESULTS.mkdir(exist_ok=True)
     per_case, scored = [], {c: [] for c in competitors}
 
     for case in CASES:
         gt = _gt(case)
-        print(f"\n=== {case['id']} — {case['entity']} ===")
+        # the question competitors actually receive
+        qcase = case if (use_real or twins) else _anon_case(case)
+        anonymized = not (use_real or twins)
+        print(f"\n=== {case['id']} — {case['entity']}"
+              f"{' [ANONYMIZED PROMPT]' if anonymized else ''} ===")
         row = {"case_id": case["id"], "entity": case["entity"], "tag": case["tag"],
                "asOf": case["asOf"], "horizon": case["horizon"], "type": case["type"],
                "unit": case.get("unit"), "options": case.get("options"),
-               "question": case["question"], "actual": case["gt"], "entries": {}}
+               "anonymized": anonymized,
+               "question": qcase["question"], "actual": case["gt"], "entries": {}}
         for comp in competitors:
             try:
                 if dry:
-                    ep, report = _dry_predict(case, comp)
+                    ep, report = _dry_predict(qcase, comp)
                 elif comp == LOKA_ID:
-                    ep, report = (predict_lokaworld_deep(case, confirm_structure)
-                                  if deep else predict_lokaworld(case))
+                    ep, report = (predict_lokaworld_deep(qcase, confirm_structure)
+                                  if deep else predict_lokaworld(qcase))
                 else:
-                    ep, report = predict_raw_model(case, comp)
+                    ep, report = predict_raw_model(qcase, comp)
                 err = None
             except Exception as e:  # noqa: BLE001
                 ep, report, err = None, {"method": "", "summary": f"(failed: {e})", "angles": []}, str(e)
             metrics = score_prediction(ep, gt)
+
+            # ── memorization check: same competitor, anonymized twin ──
+            anon_entry = None
+            if twins and err is None:
+                try:
+                    ac = _anon_case(case)
+                    if dry:
+                        ep_a, _ = _dry_predict(ac, comp)
+                    elif comp == LOKA_ID:
+                        ep_a, _ = (predict_lokaworld_deep(ac, confirm_structure)
+                                   if deep else predict_lokaworld(ac))
+                    else:
+                        ep_a, _ = predict_raw_model(ac, comp)
+                    m_a = score_prediction(ep_a, gt, is_anonymized=True)
+                    from aegeanbench.scoring import apply_memorization_gap
+                    apply_memorization_gap(metrics, m_a)
+                    anon_entry = {
+                        "pred": ep_a.point_estimate if ep_a else None,
+                        "ci": ep_a.ci_80 if ep_a else None,
+                        "direction": m_a.predicted_direction,
+                        "errPct": None if m_a.value_error_pct is None else round(m_a.value_error_pct),
+                        "within": m_a.within_ci,
+                        "correct": m_a.direction_correct if case["type"] == "match" else
+                                   (m_a.value_error_pct is not None and m_a.value_error_pct <= 15),
+                    }
+                except Exception as ae:  # noqa: BLE001
+                    print(f"    (anon twin failed for {comp}: {ae})")
+
             scored[comp].append(metrics)
             row["entries"][comp] = {
                 "direction": metrics.predicted_direction,
@@ -461,12 +515,18 @@ def main():
                            (metrics.value_error_pct is not None and metrics.value_error_pct <= 15),
                 "errPct": None if metrics.value_error_pct is None else round(metrics.value_error_pct),
                 "within": metrics.within_ci,
+                "anon": anon_entry,
+                "memGap": metrics.memorization_gap,
+                "gapLevel": metrics.gap_level,
                 "report": report, "error": err,
             }
             v = row["entries"][comp]
+            gap_s = ("" if v["memGap"] is None
+                     else f"  memGap={v['memGap']} ({v['gapLevel']})")
             print(f"  {comp:16} dir={metrics.predicted_direction} "
                   f"val={ep.point_estimate if ep else '-'} err={v['errPct']}% "
-                  f"within={v['within']} correct={v['correct']}" + (f"  ERR:{err}" if err else ""))
+                  f"within={v['within']} correct={v['correct']}{gap_s}"
+                  + (f"  ERR:{err}" if err else ""))
         per_case.append(row)
 
     # ── confidence calibration ─────────────────────────────────────────────
@@ -560,10 +620,14 @@ def _emit_frontend_js(per_case):
             if row["type"] == "match":
                 entries[comp] = {"choice": _opt_label(e["direction"]), "confidence": e["confidence"],
                                  "calConf": e.get("calConf"),
+                                 "anon": e.get("anon"), "memGap": e.get("memGap"),
+                                 "gapLevel": e.get("gapLevel"),
                                  "correct": e["correct"], "report": e["report"]}
             else:
                 entries[comp] = {"pred": e["pred"], "ci": e["ci"], "confidence": e["confidence"],
                                  "calConf": e.get("calConf"),
+                                 "anon": e.get("anon"), "memGap": e.get("memGap"),
+                                 "gapLevel": e.get("gapLevel"),
                                  "errPct": e["errPct"], "within": e["within"], "correct": e["correct"],
                                  "report": e["report"]}
         g = row["actual"]   # raw ground-truth dict
@@ -573,6 +637,7 @@ def _emit_frontend_js(per_case):
             actual["choice"] = _opt_label(g.get("direction_label"))
         cases_js.append(f"""  {{
     id: {js(row['case_id'])}, entity: {js(row['entity'])}, tag: {js(row['tag'])},
+    anonymized: {js(bool(row.get('anonymized')))},
     horizon: {js(row['horizon'])}, asOf: {js(row['asOf'])}, type: {js(row['type'])},
     unit: {js(row.get('unit'))}, {'options: ' + js(row['options']) + ',' if row.get('options') else ''}
     question: {js(row['question'])},
@@ -592,8 +657,10 @@ export const LEADERBOARD = COMPETITORS.map(m => {
     : Math.round((errs[errs.length / 2 - 1] + errs[errs.length / 2]) / 2)) : null;
   const ciRows = rows.filter(r => r.within !== null && r.within !== undefined);
   const ciHit = ciRows.filter(r => r.within).length;
+  const gaps = rows.map(r => r.memGap).filter(g => g !== null && g !== undefined);
+  const memGap = gaps.length ? Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length * 100) / 100 : null;
   return { id: m.id, name: m.name, kind: m.kind, tagline: m.tagline,
-    n, correct, accuracy: Math.round((correct / n) * 100), medianErr,
+    n, correct, accuracy: Math.round((correct / n) * 100), medianErr, memGap,
     ciHit, ciTotal: ciRows.length, ciPct: ciRows.length ? Math.round((ciHit / ciRows.length) * 100) : null };
 }).sort((a, b) => b.accuracy - a.accuracy || (a.medianErr ?? 999) - (b.medianErr ?? 999));
 
