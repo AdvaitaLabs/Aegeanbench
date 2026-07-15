@@ -5,6 +5,7 @@ from aegeanbench.scoring.event import (
     score_prediction,
     apply_memorization_gap,
     gap_level,
+    convert_to_unit,
 )
 from aegeanbench.scoring.calibration import (
     ForecastRecord,
@@ -23,6 +24,7 @@ __all__ = [
     "score_prediction",
     "apply_memorization_gap",
     "gap_level",
+    "convert_to_unit",
     "ForecastRecord",
     "brier_score",
     "accuracy",

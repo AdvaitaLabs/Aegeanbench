@@ -56,6 +56,68 @@ def _polarity(token: str) -> Optional[str]:
     return None
 
 
+# ── unit / scale normalization ─────────────────────────────────────────────
+# A prediction may be stated in a different magnitude scale than the case's
+# ground truth — e.g. a report says "1.4 million visitors" for a case whose
+# unit is "k" (thousands). Without reconciling scales, 1_400_000 vs 1_400
+# scores as a 99900% error even though the forecast is dead-on. We convert the
+# prediction into the ground-truth's unit before computing error / CI.
+#
+# Only *magnitude* scales are converted. Percent / ratio / unknown units return
+# None so we never invent a bogus conversion — those are compared as-is.
+_SCALE_WORDS = (
+    ("trillion", 1e12), ("billion", 1e9), ("million", 1e6), ("thousand", 1e3),
+    ("bn", 1e9), ("mn", 1e6),
+)
+_SCALE_EXACT = {
+    "": 1.0, "count": 1.0, "people": 1.0, "persons": 1.0, "person": 1.0,
+    "visitors": 1.0, "visitor": 1.0, "arrivals": 1.0, "tourists": 1.0,
+    "units": 1.0, "unit": 1.0, "jobs": 1.0,
+    "k": 1e3, "'000": 1e3, "000s": 1e3, "thousands": 1e3,
+    "m": 1e6, "mm": 1e6, "millions": 1e6,
+    "b": 1e9, "billions": 1e9,
+}
+
+
+def _scale_multiplier(unit: Optional[str]) -> Optional[float]:
+    """Multiplier from `unit` to a base count, or None when `unit` is not a
+    magnitude scale (percent / ratio / unknown) — callers then skip conversion."""
+    if unit is None:
+        return None
+    key = str(unit).strip().lower()
+    if not key:
+        return 1.0
+    if any(tok in key for tok in ("%", "percent", "pct", "ratio", "bps", "pp")):
+        return None
+    for word, mult in _SCALE_WORDS:
+        if word in key:
+            return mult
+    return _SCALE_EXACT.get(key)
+
+
+def convert_to_unit(value, from_unit: Optional[str], to_unit: Optional[str]):
+    """Re-express `value` (declared in from_unit) in to_unit.
+
+    Returns `value` unchanged when the TARGET unit isn't a magnitude scale
+    (percent / ratio / unknown) — those are compared as-is. When the target IS
+    a magnitude scale (k / million / …) but the source unit is missing or
+    unknown, we assume the source is a base count: a bare number like 1_400_000
+    for a case measured in thousands means 1.4M raw, i.e. 1400 k. (The model
+    competitors always echo the case unit, so a missing unit is the misbehaving
+    path, where assuming base count is the right call.)"""
+    if value is None:
+        return value
+    tm = _scale_multiplier(to_unit)
+    if tm is None or tm == 0:
+        return value
+    fm = _scale_multiplier(from_unit)
+    if fm is None:
+        fm = 1.0  # unknown/absent source unit → treat as base count
+    if fm == tm:
+        return value
+    return value * (fm / tm)
+
+
 def _direction_match(predicted: Optional[str], truth: Optional[str]) -> bool:
     """
     True if the predicted direction agrees with the ground-truth direction.
@@ -117,17 +179,30 @@ def score_prediction(
     if prediction is None:
         return m  # no parsable prediction → all-miss (case_score 0.0)
 
+    # Reconcile magnitude scale: a forecast stated as "1.4 million" against a
+    # case whose unit is "k" (thousands) must be compared as 1400, not 1_400_000.
+    # No-op when the prediction is already in the ground-truth's unit (the models
+    # are prompted with the unit), or when the unit isn't a magnitude scale (%).
+    gt_unit = getattr(ground_truth, "unit", None)
+    pred_unit = getattr(prediction, "unit", None)
+    pred_point = convert_to_unit(prediction.point_estimate, pred_unit, gt_unit)
+    pred_ci = (
+        [convert_to_unit(prediction.ci_80[0], pred_unit, gt_unit),
+         convert_to_unit(prediction.ci_80[1], pred_unit, gt_unit)]
+        if prediction.ci_80 else None
+    )
+
     m.predicted_direction = prediction.direction
-    m.predicted_value = prediction.point_estimate
+    m.predicted_value = pred_point
     m.direction_correct = _direction_match(prediction.direction, ground_truth.direction_label)
 
     actual = ground_truth.actual_value
-    if actual is not None and prediction.point_estimate is not None and actual != 0:
+    if actual is not None and pred_point is not None and actual != 0:
         m.value_error_pct = round(
-            abs(prediction.point_estimate - actual) / abs(actual) * 100.0, 2
+            abs(pred_point - actual) / abs(actual) * 100.0, 2
         )
-    if actual is not None and prediction.ci_80:
-        lo, hi = min(prediction.ci_80), max(prediction.ci_80)
+    if actual is not None and pred_ci:
+        lo, hi = min(pred_ci), max(pred_ci)
         m.within_ci = lo <= actual <= hi
 
     # Composite 0..1 case score used for the memorization gap.
