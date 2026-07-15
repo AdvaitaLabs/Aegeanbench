@@ -401,9 +401,11 @@ def capture_sim_fidelity(project_id, run_id, agent_count):
                     if d.get("node_id"): agent_node[nm] = str(d["node_id"])
             elif t == "interaction_edges":
                 for e in (d.get("edges") or []):
-                    edges.append((e.get("from_name"), e.get("to_name")))
+                    edges.append((e.get("from_name"), e.get("to_name"),
+                                  e.get("from_node"), e.get("to_node")))
             elif t == "round_action" and d.get("target_name"):
-                edges.append((d.get("agent_name"), d.get("target_name")))
+                edges.append((d.get("agent_name"), d.get("target_name"),
+                              d.get("node_id"), None))
     except Exception as e:  # noqa: BLE001
         print(f"    (fidelity: timeline fetch failed: {e})")
 
@@ -429,16 +431,17 @@ def capture_sim_fidelity(project_id, run_id, agent_count):
     }
     total = len(edges)
     cross = 0
-    _use_nodes = bool(core_nodes) and bool(agent_node)
-    for a, b in edges:
-        if _use_nodes:
-            # Precise: an edge is cross-group iff exactly one endpoint's node is
-            # in the decision core (core↔ecosystem cooperation loop).
-            na, nb = agent_node.get(str(a)), agent_node.get(str(b))
-            if na and nb and ((na in core_nodes) != (nb in core_nodes)):
+    for a, b, na, nb in edges:
+        # Prefer the node_id the event now carries directly; else map the name
+        # (world-name agents only); else fall back to the department heuristic.
+        na = na or agent_node.get(str(a))
+        nb = nb or agent_node.get(str(b))
+        if na and nb and core_nodes:
+            # Precise: cross-group iff exactly one endpoint is in the decision
+            # core (the core↔ecosystem cooperation loop).
+            if (na in core_nodes) != (nb in core_nodes):
                 cross += 1
         else:
-            # Fallback (old pipeline / no world): one side has a department.
             da, db = (agent_dept.get(str(a)) or ""), (agent_dept.get(str(b)) or "")
             if bool(da.strip()) != bool(db.strip()):
                 cross += 1
